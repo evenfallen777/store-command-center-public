@@ -1,5 +1,8 @@
-/* Admin / System settings panel: server config, backups, restart, sign out.
-   Mounted into #admin-panel-slot by renderSettings(). */
+/* Admin / System settings panel: server config, compute nodes, content flags,
+   GPU node — rendered as one full-width collapsible <details class="settings-group">
+   block per concern, stacked inside #admin-panel-slot by renderSettings().
+   Backups moved to Settings → Backups (pane-backups, loader loadBackups below);
+   Store Logs moved to Settings → Systems (settings-systems.js calls loadStoreLogs). */
 
 function _fmtBytes(n) {
   if (n < 1024) return n + ' B';
@@ -20,12 +23,15 @@ async function mountAdminPanel() {
   try { settings = await api('/api/settings'); } catch {}
 
   slot.innerHTML = `
-    <div class="settings-group-title">&#128421;&#65039; Server</div>
-    <div style="font-size:.75rem;color:var(--muted);margin-bottom:10px;">Identity &amp; location. Saved to <code>.env</code>; a restart applies them.</div>
-    <div class="field"><label>App Name ${hlp('The name shown in the app’s title/header. Cosmetic branding for this instance. Written to .env; takes effect after a restart.')}</label><input type="text" id="sv-name" value="${esc(sv.app_name||'')}"></div>
-    <div class="field"><label>Port ${hlp('The TCP port uvicorn serves on (default 8787). Must match your nginx/reverse-proxy config or the site won’t load. Change only if the port conflicts. Needs a restart.')}</label><input type="text" id="sv-port" value="${esc(String(sv.port||''))}"></div>
-    <div class="field"><label>URL Base Path <span style="color:var(--muted)">(reverse-proxy prefix, "" = root)</span> ${hlp('The path prefix the app is served under (here: /store). It must match the reverse-proxy route. Getting it wrong breaks all JS/CSS/API links. Leave “/store” unless you re-map the proxy. Needs a restart.')}</label><input type="text" id="sv-base" value="${esc(sv.base_path||'')}" placeholder="/store"></div>
-    <div class="field"><label>Data Directory <span style="color:var(--muted)">(db, designs, videos, backups)</span> ${hlp('Absolute folder where the SQLite DB, generated designs/videos, and backups live. Move it to a bigger disk if you’re low on space. Point it at an EXISTING copy to migrate. Needs a restart.')}</label><input type="text" id="sv-data" value="${esc(sv.data_dir||'')}"></div>
+    <details class="settings-group" open>
+    <summary style="cursor:pointer;font-weight:600;font-size:.9rem;">&#128421;&#65039; Server / Host</summary>
+    <div style="font-size:.75rem;color:var(--muted);margin:10px 0;">Identity &amp; location. Saved to <code>.env</code>; a restart applies them.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 18px;">
+      <div class="field"><label>App Name ${hlp('The name shown in the app’s title/header. Cosmetic branding for this instance. Written to .env; takes effect after a restart.')}</label><input type="text" id="sv-name" value="${esc(sv.app_name||'')}"></div>
+      <div class="field"><label>Port ${hlp('The TCP port uvicorn serves on (default 8787). Must match your nginx/reverse-proxy config or the site won’t load. Change only if the port conflicts. Needs a restart.')}</label><input type="text" id="sv-port" value="${esc(String(sv.port||''))}"></div>
+      <div class="field"><label>URL Base Path <span style="color:var(--muted)">(reverse-proxy prefix, "" = root)</span> ${hlp('The path prefix the app is served under (here: /store). It must match the reverse-proxy route. Getting it wrong breaks all JS/CSS/API links. Leave “/store” unless you re-map the proxy. Needs a restart.')}</label><input type="text" id="sv-base" value="${esc(sv.base_path||'')}" placeholder="/store"></div>
+      <div class="field"><label>Data Directory <span style="color:var(--muted)">(db, designs, videos, backups)</span> ${hlp('Absolute folder where the SQLite DB, generated designs/videos, and backups live. Move it to a bigger disk if you’re low on space. Point it at an EXISTING copy to migrate. Needs a restart.')}</label><input type="text" id="sv-data" value="${esc(sv.data_dir||'')}"></div>
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
       <button class="btn-sm primary" onclick="saveServerSettings()">&#128190; Save (needs restart)</button>
       <button class="btn-sm" onclick="systemRestart()">&#128260; Restart Server</button>
@@ -34,9 +40,11 @@ async function mountAdminPanel() {
     </div>
     <div id="sv-msg" style="font-size:.75rem;margin-top:8px;"></div>
     <div id="gpu-busy-banner" style="margin-top:8px;"></div>
+    </details>
 
-    <div class="settings-group-title" style="margin-top:22px;">&#129513; Compute Nodes / Model Hosts</div>
-    <div style="font-size:.75rem;color:var(--muted);margin-bottom:10px;">Where each kind of model runs. Point these at any machine on your network. Saved to <code>.env</code>; a restart applies them. Image &amp; Video share the ComfyUI host.</div>
+    <details class="settings-group">
+    <summary style="cursor:pointer;font-weight:600;font-size:.9rem;">&#129513; Compute Nodes / Model Hosts</summary>
+    <div style="font-size:.75rem;color:var(--muted);margin:10px 0;">Where each kind of model runs. Point these at any machine on your network. Saved to <code>.env</code>; a restart applies them. Image &amp; Video share the ComfyUI host.</div>
     <div class="field"><label>&#129504; LLM &mdash; LM Studio URL <span style="color:var(--muted)">(text / prompts / listings)</span> ${hlp('The OpenAI-compatible endpoint of LM Studio on your GPU box. Every text task — prompt enhance, listing copy, research, haggling, the assistant — calls this. If it’s wrong/unreachable, all those features fail. Include the /v1 suffix. Needs a restart.')}</label>
       <input type="text" id="nd-llm" value="${esc(nodes.llm_url||'')}" placeholder="http://127.0.0.1:1234/v1"></div>
     <div class="field"><label>&#129504; LLM model <span style="color:var(--muted)">(used for prompts, listings, haggling, enhance)</span> ${hlp('Which model (already loaded in LM Studio on the GPU box) every text task uses — prompt enhance, listing copy, haggling, the assistant. The list is read live from that node; pick one and click Use. Applies on the next task, no restart. For adult content pick an uncensored model.')}</label>
@@ -74,11 +82,13 @@ async function mountAdminPanel() {
         <button class="btn-sm primary" onclick="saveHfToken()">&#128190; Save</button>
       </div></div>
     <div id="hf-msg" style="font-size:.75rem;margin-top:4px;"></div>
+    </details>
 
-    <div class="settings-group-title" style="margin-top:22px;">&#127859; Content</div>
-    <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:8px;">
+    <details class="settings-group">
+    <summary style="cursor:pointer;font-weight:600;font-size:.9rem;">&#127859; Content</summary>
+    <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:8px;margin-top:10px;">
       <input type="checkbox" id="nsfw-toggle" ${(settings.nsfw_enabled||'').toString().toLowerCase().match(/^(1|true|on|yes)$/)?'checked':''} onchange="saveNsfw()" style="margin-top:3px;">
-      <span><b>&#128286; NSFW mode (master)</b><br><span style="color:var(--muted);font-size:.78rem;">Enables the Private Studio (adult content across image, video, audio &amp; 3D) and un-censors the local LLM. Off by default: everything NSFW is disabled and invisible — no tab, no routes, world integration dormant. A non-configurable safety floor always refuses content involving minors, real-person deepfakes and non-consensual themes.</span></span>
+      <span><b>&#128286; NSFW mode (master)</b><br><span style="color:var(--muted);font-size:.78rem;">Enables the Private Studio (adult content across image, video, audio &amp; 3D) and un-censors the local LLM. Off by default: everything NSFW is disabled and invisible — no tab, no routes, world integration dormant. A non-configurable safety floor always refuses content involving minors and real-person deepfakes; the toggleable content filter below covers non-consent themes.</span></span>
     </label>
     <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:8px;margin-top:8px;">
       <input type="checkbox" id="nsfw-display-toggle" ${(settings.nsfw_display||'').toString().toLowerCase().match(/^(1|true|on|yes)$/)?'checked':''} onchange="saveNsfwFlag('nsfw_display','nsfw-display-toggle')" style="margin-top:3px;">
@@ -88,34 +98,22 @@ async function mountAdminPanel() {
       <input type="checkbox" id="nsfw-world-toggle" ${(settings.nsfw_world||'').toString().toLowerCase().match(/^(1|true|on|yes)$/)?'checked':''} onchange="saveNsfwFlag('nsfw_world','nsfw-world-toggle')" style="margin-top:3px;">
       <span><b>&#127749; Company world may use the studio</b><br><span style="color:var(--muted);font-size:.78rem;">With the master on, world agents occasionally take on a "private studio commission" (an NSFW-flagged job in the normal pipeline). Town-feed/journal lines about it are ALWAYS generic PG-13 — the content itself only ever lives in the Private Studio.</span></span>
     </label>
+    <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:8px;margin-top:8px;">
+      <input type="checkbox" id="nsfw-filter-toggle" ${String(settings.nsfw_content_filter ?? '1').toLowerCase().match(/^(1|true|on|yes)$/)?'checked':''} onchange="saveNsfwFlag('nsfw_content_filter','nsfw-filter-toggle')" style="margin-top:3px;">
+      <span><b>&#129529; Content filter (soft)</b><br><span style="color:var(--muted);font-size:.78rem;">On by default. Blocks the fuzzy extra stuff — non-consent themes + over-broad keyword matches that can wrongly refuse legitimate adult prompts. Turn OFF for full discretion on your own private content. The hard floor — <b>minors</b> and <b>real-person deepfakes</b> — is ALWAYS enforced regardless of this toggle.</span></span>
+    </label>
     <div id="nsfw-msg" style="font-size:.72rem;color:var(--muted);margin-top:4px;"></div>
+    </details>
 
-    <div class="settings-group-title" style="margin-top:22px;">&#128421;&#65039; GPU Node</div>
-    <div style="font-size:.75rem;color:var(--muted);margin-bottom:10px;">Provision &amp; health-check the GPU box — image (ComfyUI), video, 3D, audio/music, LM Studio, and the autostart services. Deploy downloads any missing dependencies.</div>
+    <details class="settings-group">
+    <summary style="cursor:pointer;font-weight:600;font-size:.9rem;">&#128421;&#65039; GPU Node</summary>
+    <div style="font-size:.75rem;color:var(--muted);margin:10px 0;">Provision &amp; health-check the GPU box — image (ComfyUI), video, 3D, audio/music, LM Studio, and the autostart services. Deploy downloads any missing dependencies.</div>
     <div id="node-panel" style="font-size:.8rem;color:var(--muted);">Checking node&hellip;</div>
-
-    <div class="settings-group-title" style="margin-top:22px;">&#128190; Backups</div>
-    <div style="font-size:.75rem;color:var(--muted);margin-bottom:10px;">Stored in the store's data folder. Restore is destructive (a safety backup is taken first).</div>
-    <div style="margin-bottom:10px;"><button class="btn-sm primary" onclick="createBackup()" id="bk-create">&#10133; Create Backup</button></div>
-    <div id="backups-list" style="font-size:.78rem;color:var(--muted);">Loading&hellip;</div>
-
-    <div class="settings-group-title" style="margin-top:22px;">&#128220; Store Logs</div>
-    <div style="font-size:.75rem;color:var(--muted);margin-bottom:8px;">Everything the server logs — errors, warnings, background jobs. Rotating file in the data folder.</div>
-    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-      <select id="log-level" onchange="loadStoreLogs()" style="padding:5px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem;">
-        <option value="">All</option><option value="ERROR">Errors</option><option value="WARNING">Warnings+</option></select>
-      <input id="log-search" placeholder="filter text…" onkeydown="if(event.key==='Enter')loadStoreLogs()" style="flex:1;min-width:120px;padding:5px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem;">
-      <button class="btn-sm" onclick="loadStoreLogs()">&#128260; Refresh</button>
-      <label style="font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" id="log-auto" onchange="toggleLogAuto()"> auto</label>
-      <span id="log-tally" style="font-size:.72rem;color:var(--muted);"></span>
-    </div>
-    <pre id="store-logs" style="max-height:360px;overflow:auto;background:#0b0b0f;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:.7rem;line-height:1.35;white-space:pre-wrap;color:#cbd5e1;margin:0;">Loading&hellip;</pre>
+    </details>
   `;
-  loadBackups();
   loadNodePanel();
   refreshGpuBusy();
   loadLlmModels();
-  loadStoreLogs();
 }
 
 let _logAutoTimer = null;

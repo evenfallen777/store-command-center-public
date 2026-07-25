@@ -44,9 +44,13 @@ def loaded_model():
         checks.append({"model": cur, "level": "warn",
                        "msg": f"loaded context is only {ctx} tokens — low for rewriting whole files. "
                               f"Raise the context and reload ({want} is set)."})
-    if not loaded:
+    if not (cfg.get("models") or []):
         checks.append({"model": None, "level": "warn",
-                       "msg": "No model is resident on the GPU box. Load & pin one below so turns don't stall."})
+                       "msg": "No models in the swarm pool — add at least one below so the swarm has a model to run."})
+    elif not loaded:
+        checks.append({"model": None, "level": "info",
+                       "msg": "No model resident right now — that's fine: the swarm loads its model on demand "
+                              "through the unified GPU queue when a turn runs. Pinning is optional (keeps one warm)."})
     return {"loaded": cur, "context": ctx, "want_context": want, "all_loaded": loaded, "checks": checks}
 
 

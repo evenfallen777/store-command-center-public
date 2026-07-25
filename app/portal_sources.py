@@ -45,12 +45,19 @@ def _etsy_valid_token(s: dict) -> str:
     """Return a fresh Etsy access token, refreshing + persisting it if expired/expiring
     (same pattern as dashboard.py). Etsy tokens live ~1h, so this is routine."""
     import time
-    from etsy_client import refresh_access_token
+    from etsy_client import refresh_access_token, EtsyAuthError, auth_needs_reconnect
     key = s.get("etsy_key", ""); token = s.get("etsy_access_token", "")
     ref = s.get("etsy_refresh_token", ""); secret = s.get("etsy_shared_secret", "")
     exp = int(s.get("etsy_token_expires", "0") or 0)
     if token and ref and time.time() >= exp - 120:
-        tokens = refresh_access_token(key, ref, client_secret=secret or None)
+        # Stale OAuth → one clean 409 the UI understands, not a raw httpx 400.
+        # (Logged once by etsy_client.mark_auth_stale; known-dead tokens skip the call.)
+        if auth_needs_reconnect():
+            raise HTTPException(409, "Etsy authorization expired — reconnect Etsy in Settings.")
+        try:
+            tokens = refresh_access_token(key, ref, client_secret=secret or None)
+        except EtsyAuthError:
+            raise HTTPException(409, "Etsy authorization expired — reconnect Etsy in Settings.")
         token = tokens["access_token"]
         new_exp = int(time.time()) + tokens.get("expires_in", 3600)
         c = get_conn()

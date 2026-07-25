@@ -339,3 +339,121 @@ def test_purchase_csv_roundtrip(client):
     assert out["imported"] == 1 and len(out["errors"]) == 2
     assert client.post("/api/ledger/purchases/import", json={"csv": "  "}).status_code == 400
     _clear()
+
+
+# ── Income Phase 1: generalized `paychecks` -> any-kind income ────────────────
+# /api/ledger/paychecks stays byte-for-byte back-compat; /api/ledger/income is the
+# additive superset (income_type/currency/amount_native/external_source/
+# external_txn_id/voided). No external APIs in this phase — every POST here
+# writes external_source='manual'.
+def test_income_old_rows_default_to_paycheck_manual(client):
+    """A row created through the OLD /api/ledger/paychecks endpoint (unaware of
+    the new columns) must default to income_type='paycheck', external_source=
+    'manual', voided=0 — zero behavior change for code that never heard of Income
+    Phase 1."""
+    _clear()
+    p = _pay(client, source="Legacy Co", amount_cents=55000, received_at="2026-07-05")
+    assert p["income_type"] == "paycheck"
+    assert p["currency"] == "USD"
+    assert p["external_source"] == "manual"
+    assert p["external_txn_id"] is None
+    assert p["voided"] == 0
+    assert p["amount_native"] is None
+
+    # and it shows up in the superset view, filed under 'paycheck'
+    inc = client.get("/api/ledger/income").json()
+    row = next(x for x in inc["income"] if x["id"] == p["id"])
+    assert row["income_type"] == "paycheck" and row["source"] == "Legacy Co"
+
+
+def test_income_post_sale_appears_and_totals(client):
+    _clear()
+    _pay(client, source="Day job", amount_cents=200000, received_at="2026-07-01")
+    r = client.post("/api/ledger/income", json={
+        "source": "Etsy shop", "income_type": "sale", "amount_cents": 4500,
+        "received_at": "2026-07-02", "currency": "USD"})
+    assert r.status_code == 200, r.text
+    sale = r.json()
+    assert sale["income_type"] == "sale" and sale["amount_cents"] == 4500
+    assert sale["external_source"] == "manual" and sale["external_txn_id"] is None
+
+    inc = client.get("/api/ledger/income").json()
+    ids = {x["id"] for x in inc["income"]}
+    assert sale["id"] in ids
+    by_type = {b["income_type"]: b for b in inc["by_type"]}
+    assert by_type["sale"]["total_cents"] == 4500 and by_type["sale"]["count"] == 1
+    assert by_type["paycheck"]["total_cents"] == 200000
+
+    # ?type= filters the row list
+    only_sales = client.get("/api/ledger/income?type=sale").json()["income"]
+    assert [x["source"] for x in only_sales] == ["Etsy shop"]
+    assert client.get("/api/ledger/income?type=bogus").status_code == 400
+
+    # month/YTD totals on the superset now include the sale
+    assert inc["month_cents"] == 204500 and inc["ytd_cents"] == 204500
+
+    # the pre-existing /api/ledger/paychecks endpoint is UNCHANGED: still lists
+    # every row regardless of income_type (back-compat — it never learned to filter)
+    old = client.get("/api/ledger/paychecks").json()
+    assert {x["source"] for x in old["paychecks"]} == {"Day job", "Etsy shop"}
+    assert old["month_cents"] == 204500
+
+
+def test_income_voided_excluded_from_totals(client):
+    _clear()
+    keep = _pay(client, source="Kept", amount_cents=10000, received_at="2026-07-03")
+    r = client.post("/api/ledger/income", json={
+        "source": "Duplicate import", "income_type": "sale", "amount_cents": 9999999,
+        "received_at": "2026-07-03"})
+    voided_id = r.json()["id"]
+
+    pre = client.get("/api/ledger/income").json()
+    assert pre["month_cents"] == 10000 + 9999999
+
+    v = client.patch(f"/api/ledger/income/{voided_id}", json={"voided": True})
+    assert v.status_code == 200 and v.json()["voided"] == 1
+
+    post = client.get("/api/ledger/income").json()
+    assert post["month_cents"] == 10000 and post["ytd_cents"] == 10000
+    by_type = {b["income_type"]: b for b in post["by_type"]}
+    assert "sale" not in by_type or by_type.get("sale", {}).get("total_cents", 0) == 0
+    # the voided row still shows up in the row list (so it can be reviewed/un-voided)
+    assert voided_id in {x["id"] for x in post["income"]}
+
+    # /api/ledger/summary and /api/ledger/series also exclude voided income
+    s = client.get("/api/ledger/summary").json()
+    assert s["month"]["income_cents"] == 10000
+    ser = client.get("/api/ledger/series?months=1").json()
+    assert ser["income_cents"][-1] == 10000
+
+    # un-voiding restores it
+    client.patch(f"/api/ledger/income/{voided_id}", json={"voided": False})
+    assert client.get("/api/ledger/income").json()["month_cents"] == 10000 + 9999999
+
+
+def test_income_patch_delete_and_paychecks_endpoint_untouched(client):
+    _clear()
+    r = client.post("/api/ledger/income", json={
+        "source": "Freelance gig", "income_type": "other", "amount_cents": 1500,
+        "received_at": "2026-07-04"})
+    iid = r.json()["id"]
+
+    upd = client.patch(f"/api/ledger/income/{iid}", json={"income_type": "gift", "notes": "birthday"})
+    assert upd.status_code == 200
+    assert upd.json()["income_type"] == "gift" and upd.json()["notes"] == "birthday"
+
+    assert client.patch(f"/api/ledger/income/{iid}", json={"income_type": "not-a-type"}).status_code == 400
+    assert client.patch("/api/ledger/income/999999", json={"notes": "x"}).status_code == 404
+    assert client.post("/api/ledger/income", json={"source": "x", "income_type": "not-a-type",
+                                                    "amount_cents": 1}).status_code == 400
+    assert client.post("/api/ledger/income", json={"source": " ", "amount_cents": 1}).status_code == 400
+
+    assert client.delete(f"/api/ledger/income/{iid}").status_code == 200
+    assert client.delete(f"/api/ledger/income/{iid}").status_code == 404
+
+    # /api/ledger/paychecks CRUD is completely unaffected by any of this
+    p = _pay(client, source="Still works", amount_cents=7777, received_at="2026-07-06")
+    assert p["amount_cents"] == 7777
+    assert client.get("/api/ledger/paychecks").json()["paychecks"][0]["source"] == "Still works"
+    assert client.delete(f"/api/ledger/paychecks/{p['id']}").status_code == 200
+    _clear()

@@ -35,7 +35,10 @@ function _agentTile(a) {
     const g = (typeof _raidGeom === 'function') ? _raidGeom() : null;
     const cx = g ? g.cx : WM.COLS / 2, cy = g ? g.cy : WM.ROWS / 2;
     const RX = g ? g.RX : 34, RY = g ? g.RY : 28;
-    const ang = (a.id % 12) / 12 * Math.PI * 2;
+    // hash the id to an angle instead of `id % 12` (only 12 slots → up to 4 of the
+    // 39 agents shared an angle and stacked). 3600 slots is effectively collision-free.
+    const _rh = (a.id * 2654435761) >>> 0;
+    const ang = (_rh % 3600) / 3600 * Math.PI * 2;
     if (a.role === 'build') {                         // spread all around the wall ring
       return { col: Math.round(cx + Math.cos(ang) * RX), row: Math.round(cy + Math.sin(ang) * RY) };
     }
@@ -48,6 +51,13 @@ function _agentTile(a) {
       return { col: b.c + (b.w / 2 | 0), row: b.r + (b.h / 2 | 0) };
     }
   }
+  // WM.locations[kind] collapses to ONE tile even when several matching nodes
+  // exist (play-god can add extra resource nodes of the same kind) — every agent
+  // headed there piled onto that single tile. Spread a cohort across all matching
+  // nodes; falls back to the single collapsed location when there's just one (or
+  // none), so the common case is unchanged.
+  const nodeCands = (WM.nodes || []).filter(n => n.kind === loc);
+  if (nodeCands.length > 1) return nodeCands[a.id % nodeCands.length];
   return WM.locations[loc] || WM.locations['park'] || { col: 28, row: 22 };
 }
 
@@ -360,6 +370,7 @@ async function renderWorld() {
   // visible procedural→image second bake on load. (Post-generation live swaps still use
   // the async setTerrainImage(url) path, where a swap is expected.)
   const layP = api('/api/world/layout');
+  const hqP = api('/api/world/hq/stages').catch(() => null);   // HQ progression stages (era snapshots)
   const terrP = api('/api/world/terrain').catch(() => null);
   const floorP = api('/api/world/floor').catch(() => null);   // Layer-2b: shared interior-floor texture
   const moonP = api('/api/world/moon').catch(() => null);     // sky: moon texture + enable/daytime flags
@@ -374,6 +385,15 @@ async function renderWorld() {
     }
   } catch {}
   try { const lr = await layP; _lay = lr?.layout; _wearSaved = lr?.wear; } catch {}
+  // HQ stage: hand the ACTIVE era to WM before build() so the single bake already
+  // renders the right footprint (compound Iron/Steel Age vs the founding block).
+  try {
+    const hs = await hqP;
+    if (hs && Array.isArray(hs.stages) && WM.setHqStage) {
+      window._hqStages = hs;
+      WM.setHqStage(hs.stages.find(s => s.id === hs.active) || null);
+    }
+  } catch {}
   try {
     const tr = await terrP;
     if (tr && tr.enabled && tr.has_image && tr.url) {
@@ -517,6 +537,13 @@ async function renderWorld() {
     }
     _selectedId = best ? +best : null;
     if (best != null && window.WHUD) WHUD.open('agent');   // clicking a citizen surfaces their card
+    // no agent under the cursor → maybe a VENUE: each wired building opens its
+    // matching system (⛪→Jesus · 🍺→Satan · 🎓→knowledge hub · 🏛️→Republic · 👔→Board).
+    if (best == null) {
+      const t = WM.worldToTile(w.x, w.y);
+      const b = WM.buildingAtTile(t.col, t.row);
+      if (b && _openVenue(b)) return;
+    }
     _renderDetail();
     if (window.WHUD) WHUD.onState(_worldState);            // refresh portrait/skills for the new selection
   });
@@ -535,6 +562,30 @@ async function renderWorld() {
   _startWorldLoops();            // poll + RAF; visibilitychange pauses/resumes them
 }
 window.renderWorld = renderWorld;
+
+/* ── venue → system wiring: clicking a building opens the surface it embodies ──
+   ⛪ Church → ✝️ Jesus console · 🍺 Bar → 😈 Satan console · 🎓 University →
+   the knowledge hub (Library/Research/Graph/Live-Docs) · 📚 Library → the hub's
+   library pane · 🏛️ Town Hall → the Republic · 👔 Boss's Office → the Board.
+   The 🔞 store is INERT unless the layered NSFW gate is on (then → Satan's
+   console, where its oversight ledger lives). Returns true when consumed. */
+function _openVenue(b) {
+  try {
+    switch (b.loc) {
+      case 'church':   if (window.worldConsole) { worldConsole('jesus'); return true; } break;
+      case 'bar':      if (window.worldConsole) { worldConsole('satan'); return true; } break;
+      case 'school':   if (typeof switchView === 'function') { switchView('knowledge'); return true; } break;
+      case 'library':  if (typeof switchView === 'function') { switchView('library'); return true; } break;
+      case 'townhall': if (window.worldConsole) { worldConsole('republic'); return true; } break;
+      case 'exec':     if (window.worldConsole) { worldConsole('board'); return true; } break;
+      case 'research': if (typeof switchView === 'function') { switchView('research'); return true; } break;
+      case 'nsfw':                             // GATED: boarded-up store does nothing at all
+        if (window._wmNsfwOn === true && window.worldConsole) { worldConsole('satan'); return true; }
+        break;
+    }
+  } catch (e) { /* venue wiring must never break map clicks */ }
+  return false;
+}
 
 function worldRecenter() {   // fit the whole city
   const cv = document.getElementById('world-canvas');
@@ -555,6 +606,12 @@ async function _pollWorld() {
   try {
     const st = await api('/api/world/state');
     _worldState = st;
+    // 😈 NSFW-store gate flag (server ANDs world_satan_nsfw_domain + nsfw.world_active();
+    // absent/old backend → undefined → treated as OFF everywhere). Read-only mirror.
+    window._wmNsfwOn = (st.nsfw_store_open === true);
+    // naming-theme sync (display labels only — world-theme.js). Absent/old
+    // backend → undefined → WTheme keeps its current (default themed) value.
+    if (st.naming_theme && window.WTheme) WTheme.set(st.naming_theme);
     _assignHouses(st.agents);
     // push accumulated foot-traffic to the server (~every 60s) so trails persist
     if (++_wearPushN % 20 === 0 && WM.takeWearDirty) {
@@ -657,6 +714,67 @@ async function _pollWorld() {
   } catch (e) { /* keep last frame */ }
 }
 
+
+/* ── HQ progression stages: view the eras, advance up the ladder ──────────────
+   Each stage is an era snapshot of the HQ (world_hq backend). Viewing an
+   earlier stage re-renders the HQ with that era's footprint locally + persists
+   the choice; advancing is gated on the world_tech tier and archives the look
+   being left. All pure data + canvas — no LLM/GPU work. */
+function _hqApplyFromList(hs) {
+  window._hqStages = hs;
+  if (WM.applyHqStage) WM.applyHqStage(hs.stages.find(s => s.id === hs.active) || null);
+}
+async function worldHqPanel() {
+  let hs = null;
+  try { hs = await api('/api/world/hq/stages'); } catch (e) { toast?.(e.message); return; }
+  window._hqStages = hs;
+  const rows = (hs.stages || []).map(s => {
+    const state = s.active ? '<span style="color:#5db07a;font-weight:700">● active</span>'
+      : s.unlocked ? `<button class="btn" style="padding:3px 10px" onclick="worldHqSetStage(${s.id})">👁 View this era</button>`
+      : `<span style="color:#7a86a0">🔒 needs ${esc(s.tier_required_name || '')} tier</span>`;
+    const snap = s.snapshot_at ? `<div style="color:#7a86a0;font-size:.68rem">look archived ${esc(s.snapshot_at)}</div>` : '';
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid #1b2740">
+      <div style="font-size:1.3rem">${s.emoji || '🏢'}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;color:#e8eefc">${esc(s.name)} <span style="color:#7a86a0;font-weight:400;font-size:.72rem">(${esc(s.key)})</span></div>
+        <div style="color:#9fb0cc;font-size:.74rem;margin:2px 0">${esc(s.style?.desc || '')}</div>${snap}
+      </div>
+      <div style="white-space:nowrap">${state}</div>
+    </div>`;
+  }).join('');
+  const adv = hs.next
+    ? (hs.next.ready
+       ? `<button class="btn" style="background:#2a5a3a;padding:6px 14px" onclick="worldHqAdvance()">🏗️ Advance to the ${esc(hs.next.name)}</button>`
+       : `<span style="color:#7a86a0;font-size:.76rem">Next: ${esc(hs.next.name)} — unlocks with the tech-tier progression (currently ${esc(hs.tier_name)}).</span>`)
+    : `<span style="color:#7a86a0;font-size:.76rem">The HQ is in its final stage.</span>`;
+  const html = `<div style="font-size:.78rem;color:#c7d2e5">
+    <div style="color:#9fb0cc;margin-bottom:6px">The HQ evolves through eras. Advancing archives the current look as an earlier
+    stage you can always look back on; the tech tier (${esc(hs.tier_name)}) gates the ladder.</div>
+    ${rows}
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center">${adv}</div>
+  </div>`;
+  if (typeof _worldModal === 'function') _worldModal('🏭 HQ Progression Stages', html);
+}
+async function worldHqSetStage(id) {
+  try {
+    await api('/api/world/hq/stage', { method: 'POST', body: JSON.stringify({ id }) });
+    const hs = await api('/api/world/hq/stages');
+    _hqApplyFromList(hs);
+    toast?.('HQ stage switched ✓');
+    worldHqPanel();
+  } catch (e) { toast?.(e.message); }
+}
+async function worldHqAdvance() {
+  try {
+    const r = await api('/api/world/hq/advance', { method: 'POST', body: '{}' });
+    const hs = await api('/api/world/hq/stages');
+    _hqApplyFromList(hs);
+    toast?.(`🏗️ HQ advanced to the ${r.stage?.name || 'next stage'} — previous look archived ✓`);
+    worldHqPanel();
+  } catch (e) { toast?.(e.message); }
+}
+window.worldHqPanel = worldHqPanel; window.worldHqSetStage = worldHqSetStage;
+window.worldHqAdvance = worldHqAdvance;
 
 window.worldToggleEdit = worldToggleEdit; window.worldEditResize = worldEditResize;
 window.worldEditAdd = worldEditAdd; window.worldEditDelete = worldEditDelete;

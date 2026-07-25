@@ -187,10 +187,15 @@ async function loadPortalItems(src) {
 }
 
 function portalCardHtml(it, i, isMedia, isLocal) {
+  // 'image' source items are local design originals (/designs/<sub>/<file>, often
+  // multi-MB) — thumbnail those; external CDN urls (etsy/printify/cults3d/affiliate)
+  // and video posters can't be thumbnailed server-side, so they load as-is.
+  const fullImg = it.image_url ? (it.image_url.startsWith('/') ? API + it.image_url : esc(it.image_url)) : '';
+  const thumbImg = it.source === 'image' ? thumbUrl(it.image_url) : fullImg;
   const img = it.image_url
     ? (it.source === 'video'
-        ? `<video src="${it.image_url.startsWith('/') ? API + it.image_url : esc(it.image_url)}" muted style="width:100%;height:150px;object-fit:cover;border-radius:8px 8px 0 0;"></video>`
-        : `<img src="${it.image_url.startsWith('/') ? API + it.image_url : esc(it.image_url)}" loading="lazy" style="width:100%;height:150px;object-fit:cover;border-radius:8px 8px 0 0;">`)
+        ? `<video src="${fullImg}" muted style="width:100%;height:150px;object-fit:cover;border-radius:8px 8px 0 0;"></video>`
+        : `<img src="${thumbImg}" loading="lazy" decoding="async" style="width:100%;height:150px;object-fit:cover;border-radius:8px 8px 0 0;" onerror="this.onerror=null;this.src='${fullImg}'">`)
     : `<div style="width:100%;height:150px;display:flex;align-items:center;justify-content:center;background:var(--bg2);border-radius:8px 8px 0 0;color:var(--muted);font-size:2rem;">&#128444;&#65039;</div>`;
   const pushedBadge = it.pushed
     ? `<a href="${esc(it.wp_link || '#')}" target="_blank" rel="noopener"

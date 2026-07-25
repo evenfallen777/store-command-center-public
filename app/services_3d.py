@@ -136,7 +136,18 @@ def generate_model3d_mesh(model_id: int, image_path: str, gen_script: str = None
     # Standalone image→3D models (TripoSG/Hunyuan/SF3D/TRELLIS) need the WHOLE GPU, so
     # use video_acquire — it frees ComfyUI's cached model (~6.7 GB after SDXL) AND the LLM.
     # image_acquire only frees the LLM, leaving ComfyUI resident → 3D OOMs on the 12 GB card.
-    orch.video_acquire()
+    try:
+        orch.video_acquire()
+    except RuntimeError as e:
+        # GPU could not be freed (offender named in the message) — fail clearly.
+        # A failed acquire holds nothing: no video_release().
+        logger.error("generate_model3d_mesh #%d GPU acquire failed: %s", model_id, e)
+        conn = get_conn()
+        conn.execute("UPDATE models3d SET status='error',progress_msg='❌ GPU busy',"
+                     "publish_error=?,updated_at=datetime('now') WHERE id=?",
+                     (str(e)[:250], model_id))
+        conn.commit(); conn.close()
+        return
     _gpu_held = True
     conn = get_conn()
     row = conn.execute("SELECT * FROM models3d WHERE id=?", (model_id,)).fetchone()
@@ -219,7 +230,11 @@ def test_gen_model(key: str) -> dict:
     remote_out = f"/tmp/test_{key}_{ts}.glb"
     # a sample image that ships with TripoSR; fall back to any png on the box
     sample = "$HOME/TripoSR/examples/chair.png"
-    orch.video_acquire()
+    try:
+        orch.video_acquire()
+    except RuntimeError as e:
+        # a failed acquire holds nothing — do not video_release()
+        return {"ok": False, "error": str(e)[:260]}
     t0 = time.time()
     try:
         pick = (f'IMG={sample}; [ -f "$IMG" ] || IMG=$(find $HOME/TripoSR/examples '
@@ -243,6 +258,60 @@ def test_gen_model(key: str) -> dict:
         return {"ok": False, "error": str(e)[:260]}
     finally:
         orch.video_release()
+
+
+# ── 3D generator VRAM preflight ───────────────────────────────────────────────
+# TRELLIS needs ~16 GB VRAM; this node has a 12 GB card and can never run it —
+# without this gate, picking TRELLIS launches straight into the cryptic
+# `OSError: libcudart.so.13: cannot open shared object file` (shadow-torch) failure
+# deep in the pipeline. Fail fast at request time instead, with a clear message.
+_gpu_capacity_cache = {"mb": None, "checked_at": 0.0}
+_GPU_CAPACITY_TTL = 600  # seconds — total VRAM is a hardware constant; cache generously
+
+
+def gpu_capacity_mb():
+    """Total VRAM (MiB) on the node's GPU, via `nvidia-smi --query-gpu=memory.total`.
+    Cached for _GPU_CAPACITY_TTL. Returns None on ANY failure (node unreachable, no
+    nvidia-smi, parse error) — never raises. Callers must treat None as 'unknown' and
+    must NOT block on it (only refuse when capacity is positively known to be too small)."""
+    now = time.time()
+    cached = _gpu_capacity_cache["mb"]
+    if cached is not None and (now - _gpu_capacity_cache["checked_at"]) < _GPU_CAPACITY_TTL:
+        return cached
+    try:
+        r = subprocess.run(
+            BOX_SSH + ["nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            mb = int((r.stdout or "").strip().splitlines()[0].strip())
+            _gpu_capacity_cache.update({"mb": mb, "checked_at": now})
+            return mb
+    except Exception:
+        pass
+    return None
+
+
+def check_3d_vram_or_raise(gen: dict) -> None:
+    """Preflight for the /api/models3d/generate path: if `gen`'s min_vram_mb exceeds
+    this node's GPU capacity, raise a clear HTTPException instead of letting the job
+    launch into a cryptic mid-pipeline failure (TRELLIS's shadow-torch libcudart crash,
+    or a plain OOM). Unknown capacity (node unreachable / nvidia-smi missing) is NOT a
+    reason to block — we only refuse when we POSITIVELY know it won't fit. Never raises
+    anything other than the intended HTTPException."""
+    need = gen.get("min_vram_mb")
+    if not need:
+        return
+    try:
+        cap = gpu_capacity_mb()
+    except Exception:
+        cap = None
+    if cap is not None and cap < need:
+        label = gen.get("label", gen.get("key", "this generator"))
+        raise HTTPException(
+            400,
+            f"{label} needs ~{need // 1000}GB VRAM; this node's GPU has "
+            f"~{cap // 1000}GB — use TripoSR/TripoSG/SF3D instead."
+        )
 
 
 # Export everything (incl. single-underscore helpers used across modules).

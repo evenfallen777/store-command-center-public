@@ -44,10 +44,11 @@ from .llm import (
     _extract_json, _parse_vote, _loaded_llms,
 )
 
-# ── git sandbox + file scoping ───────────────────────────────────────────────
+# ── git sandbox + file scoping (project-aware working dirs) ─────────────────
 from .workspace import (
-    _git_dev, _scoped_paths, _path_allowed, _FILE_RE, _parse_files,
+    _git_dev, _git_ws, _scoped_paths, _path_allowed, _FILE_RE, _parse_files,
     _read_scoped_context, _fallback_single_file, _repo_tree, _read_files,
+    _job_project, _job_workdir, _prepare_workdir,
 )
 
 # ── gated system-agent installs (+ the SYSTEM_SYS prompt) ─────────────────────

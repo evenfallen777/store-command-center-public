@@ -15,8 +15,8 @@ read, or written. Embedding jobs go through LM Studio's embeddings passthrough, 
 coexists with the resident chat model (no model swapping on the host).
 
 Pairing = invite key + human approval:
-  1. Host: Settings → Peers → "New invite key" → give it to the friend out-of-band.
-  2. Friend: Settings → Peers → "Connect" with the host's URL + invite key. Their node
+  1. Host: Crypto → JellyCoin → Peers → "New invite key" → give it to the friend out-of-band.
+  2. Friend: Crypto → JellyCoin → Peers → "Connect" with the host's URL + invite key. Their node
      calls our /api/peers/rpc/pair; keys are exchanged (each side stores the OTHER
      side's key encrypted, and a HASH of the key it accepts — a DB leak exposes no
      usable inbound credential).

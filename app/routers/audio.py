@@ -188,6 +188,50 @@ def enhance_audio_prompt(req: EnhancePromptReq):
     return {"task_id": tid}
 
 
+class LyricsReq(BaseModel):
+    prompt: str = ""          # the song idea / theme (or an existing draft to rework)
+    style: str = ""           # the music prompt: genre / mood / voice context
+
+
+@router.post("/api/audio/generate-lyrics")
+def generate_lyrics(req: LyricsReq):
+    """Write ACE-Step-formatted lyrics from a song idea (+ the genre/mood prompt for
+    context). Rides the unified queue; returns {task_id}, poll /api/task/{id} → the
+    result drops into the lyrics field."""
+    idea = (req.prompt or "").strip()
+    style = (req.style or "").strip()
+    if not idea and not style:
+        raise HTTPException(400, "Describe the song (theme and/or genre/mood) first")
+    SYS = get_prompt('audio_lyrics')
+    # User turn = the theme plus the style context so the words match the track.
+    user = idea or f"A song in this style: {style}"
+    if style and idea:
+        user = f"Song idea / theme:\n{idea}\n\nMusical style (match this):\n{style}"
+
+    def _work():
+        # 4000 tokens: a full song (intro/verses/chorus×2/bridge/outro) is far longer
+        # than the single 'FINAL:' line the enhancer emits (2000), and reasoning models
+        # still burn a slice on <think> even with reasoning_effort=none — give the words
+        # room so the song never truncates mid-verse.
+        raw = _call_lmstudio(SYS, user, max_tokens=4000)
+        import re as _re
+        txt = _re.sub(r'<think>.*?</think>', '', raw, flags=_re.DOTALL).strip()
+        # Strip a ``` fenced block if the model wrapped the lyrics in one.
+        m = _re.search(r'```[a-zA-Z]*\s*(.+?)\s*```', txt, flags=_re.DOTALL)
+        if m:
+            txt = m.group(1).strip()
+        # Drop any preamble before the first section tag ([verse]/[intro]/…).
+        tag = _re.search(r'\[[a-zA-Z][a-zA-Z0-9 _-]*\]', txt)
+        if tag:
+            txt = txt[tag.start():].strip()
+        # `text` is the field the shared enhance helper drops into the target textarea.
+        return {"lyrics": txt, "text": txt, "style": style}
+
+    tid = orch.submit_llm(_work, desc=f"Write lyrics: {(idea or style)[:40]}",
+                          priority=0, task="audio_lyrics")   # user waiting
+    return {"task_id": tid}
+
+
 @router.get("/api/audio/engines")
 def audio_engines():
     return [{"key": k, **v} for k, v in _svc.AUDIO_ENGINES.items()]
@@ -197,7 +241,10 @@ def audio_engines():
 def list_audio():
     conn = get_conn()
     # nsfw-flagged clips never appear here — /api/nsfw/library only.
+    # studio_cue_id clips belong to the Director tab, chain_id clips to their
+    # video chain — neither shows in this gallery.
     rows = conn.execute("SELECT * FROM audio_clips WHERE COALESCE(nsfw,0)=0 "
+                        "AND studio_cue_id IS NULL AND chain_id IS NULL "
                         "ORDER BY created_at DESC LIMIT 200").fetchall()
     conn.close()
     return [dict(r) for r in rows]

@@ -7,38 +7,86 @@ import services as _svc
 router = APIRouter()
 
 
+# Omitted numeric fields (None) resolve through video_gen_settings(model_id) —
+# per-model catalog defaults + the owner's saved overrides. The catalog defaults
+# equal the old hardcoded ones (832×480 · 49f · 20 steps · 16 fps · strength 0.7),
+# so requests behave exactly as before unless the owner tunes a model. Explicit
+# values in the request always win (the UI sends explicit values).
 class VideoRequest(BaseModel):
     prompt: str
-    width: int = 832
-    height: int = 480
-    num_frames: int = 49
-    steps: int = 20
-    fps: int = 16
+    width: int | None = None
+    height: int | None = None
+    num_frames: int | None = None
+    steps: int | None = None
+    fps: int | None = None
     seed: int = 0
     model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+    # "Generate with audio" (opt-in, default OFF = today's behavior): on success
+    # the existing add_video_audio bridge runs automatically (music + narration).
+    audio_enabled: bool = False
+    music_prompt: str = ""    # empty → add_video_audio derives one from the prompt
+    narration: str = ""       # empty → music only, no voice
 
 class VideoChainRequest(BaseModel):
     title: str = ""
     concept: str = ""
     prompts: list[str]
     model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
-    width: int = 832
-    height: int = 480
-    num_frames: int = 49
-    steps: int = 20
-    fps: int = 16
-    strength: float = 0.7   # 0=copy prev video, 1=ignore it. 0.6-0.75 = smooth continuation
+    width: int | None = None
+    height: int | None = None
+    num_frames: int | None = None
+    steps: int | None = None
+    fps: int | None = None
+    strength: float | None = None   # 0=copy prev video, 1=ignore it. 0.6-0.75 = smooth continuation
+    # Layered chain audio (opt-in, default OFF = today's behavior). Settings
+    # keys mirror services_media_chain.DEFAULT_CHAIN_AUDIO (music/voice/sfx
+    # toggles + per-layer volumes + engines + music_prompt/narration overrides).
+    audio_enabled: bool = False
+    audio_settings: dict | None = None
+
+
+def _resolve_video_params(req, keys=("width", "height", "num_frames", "steps", "fps")):
+    """Explicit request value wins; omitted fields take the model's effective
+    per-model setting; final fallback = the old hardcoded defaults."""
+    hard = {"width": 832, "height": 480, "num_frames": 49, "steps": 20,
+            "fps": 16, "strength": 0.7}
+    s = video_gen_settings(req.model_id)
+    out = {}
+    for k in keys:
+        v = getattr(req, k)
+        out[k] = v if v is not None else s.get(k, hard[k])
+    return out
 
 class ChainPromptsRequest(BaseModel):
     concept: str
     num_segments: int = 3
     style: str = ""
 
+
+# "Audio that matches the video": appended to the base 'video_chain' system
+# prompt so the SAME LLM pass also writes the matching audio — a narration
+# line per scene, one overall music vibe, and per-scene SFX hints. This text
+# lives HERE (router layer) on purpose: the prompt registry (prompts.py) is
+# shared with other live sessions. The addendum overrides the base prompt's
+# "return a JSON array" instruction with a JSON object that still carries the
+# same prompts array, and the old array/line parsers below stay as fallbacks,
+# so a model that ignores the addendum degrades to today's prompts-only shape.
+_CHAIN_AUDIO_ADDENDUM = """
+
+ADDITIONALLY: this video gets a generated soundtrack, so write the matching audio in the SAME response.
+Instead of a bare JSON array, return ONLY one JSON object (no markdown, no code fences, no other text) with exactly these keys:
+  "prompts": the JSON array of scene prompt strings described above
+  "narrations": array of the SAME length — for each scene, ONE short spoken voice-over line (max 20 words) matching that scene's action; natural spoken language, present tense, no camera/visual-prompt jargon
+  "music": ONE short background-music description for the WHOLE video (instrumental; genre, tempo, mood — max 15 words)
+  "sfx": array of the SAME length — for each scene, a 3-8 word sound-effect hint matching its action (foley, no music, no melody)"""
+
 @router.get("/api/video-chains")
 def list_video_chains():
     conn = get_conn()
     chains = conn.execute(
-        "SELECT * FROM video_chains WHERE COALESCE(nsfw,0)=0 ORDER BY created_at DESC"
+        # studio_scene_id chains belong to the Director tab, not this gallery
+        "SELECT * FROM video_chains WHERE COALESCE(nsfw,0)=0 AND studio_scene_id IS NULL "
+        "ORDER BY created_at DESC"
     ).fetchall()
     result = []
     for c in chains:
@@ -74,14 +122,19 @@ def get_video_chain(chain_id: int):
 def create_video_chain(req: VideoChainRequest, background_tasks: BackgroundTasks):
     if len(req.prompts) < 1:
         raise HTTPException(400, "Need at least 1 prompt to create a chain")
+    check_video_vram_or_raise(req.model_id)   # fail fast if this model can't fit on the node's GPU
 
     title = req.title or f"Chain: {req.prompts[0][:40]}"
+    p = _resolve_video_params(req, keys=("width", "height", "num_frames",
+                                         "steps", "fps", "strength"))
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO video_chains (title,concept,model_id,width,height,num_frames,steps,fps,strength,prompts,total_segments) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (title, req.concept, req.model_id, req.width, req.height, req.num_frames,
-         req.steps, req.fps, req.strength, json.dumps(req.prompts), len(req.prompts))
+        "INSERT INTO video_chains (title,concept,model_id,width,height,num_frames,steps,fps,strength,prompts,total_segments,audio_enabled,audio_settings) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (title, req.concept, req.model_id, p["width"], p["height"], p["num_frames"],
+         p["steps"], p["fps"], p["strength"], json.dumps(req.prompts), len(req.prompts),
+         1 if req.audio_enabled else 0,
+         json.dumps(req.audio_settings) if req.audio_settings else None)
     )
     chain_id = cur.lastrowid
     conn.commit()
@@ -131,6 +184,9 @@ def compile_video_chain(chain_id: int, background_tasks: BackgroundTasks):
     ).fetchall()
     paths = [s["video_path"] for s in segs if s["video_path"]]
     chain_fps = chain["fps"] or 16
+    # Normalize to the chain's own size (falls back to the old defaults) so a
+    # mismatched segment can't dictate the compiled video's dimensions.
+    chain_wh = (chain["width"] or 832, chain["height"] or 480)
     conn.close()
     if not paths:
         raise HTTPException(400, "No completed segments to compile")
@@ -138,7 +194,7 @@ def compile_video_chain(chain_id: int, background_tasks: BackgroundTasks):
     def _do_compile():
         out = str(_chain_compiled_path(chain_id))
         try:
-            _compile_chain_video(paths, out, fps=chain_fps)
+            _compile_chain_video(paths, out, fps=chain_fps, target=chain_wh)
             c = get_conn()
             c.execute(
                 "UPDATE video_chains SET compiled_path=?,updated_at=datetime('now') WHERE id=?",
@@ -149,6 +205,13 @@ def compile_video_chain(chain_id: int, background_tasks: BackgroundTasks):
             logger.info("Chain %d compiled: %s", chain_id, out)
         except Exception as ex:
             logger.error("Chain %d compile failed: %s", chain_id, ex)
+            return
+        # Audio-enabled chains get their layered soundtrack after a manual
+        # compile too (no-op unless the chain opted in — default OFF).
+        try:
+            render_chain_audio(chain_id)
+        except Exception as ex:
+            logger.error("Chain %d audio pass crashed: %s", chain_id, ex)
 
     background_tasks.add_task(_do_compile)
     return {"message": "Compiling chain video…"}
@@ -164,8 +227,41 @@ def generate_chain_prompts(req: ChainPromptsRequest):
         user_msg += f"\nStyle/mood: {req.style}"
 
     def _work():
-        raw = _call_lmstudio(get_prompt('video_chain'), user_msg, max_tokens=1500)
+        raw = _call_lmstudio(get_prompt('video_chain') + _CHAIN_AUDIO_ADDENDUM,
+                             user_msg, max_tokens=2000)
         import re as _re
+
+        def _strlist(v, limit):
+            return [str(x).strip() for x in v][:limit] if isinstance(v, list) else []
+
+        # Preferred shape (audio addendum): one JSON object
+        # {prompts, narrations, music, sfx}. Audio keys are optional — anything
+        # missing/empty is simply omitted from the result, so callers that only
+        # know "prompts" behave exactly as before. <think> blocks stripped
+        # first (reasoning models wrap their JSON in them).
+        cleaned = _re.sub(r'<think>.*?</think>', '', raw, flags=_re.DOTALL).strip()
+        mo = _re.search(r'\{.*\}', cleaned, _re.DOTALL)
+        if mo:
+            try:
+                data = json.loads(mo.group())
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                prompts = [p for p in _strlist(data.get("prompts"), req.num_segments) if p]
+                if prompts:
+                    out = {"prompts": prompts}
+                    narrs = [x for x in _strlist(data.get("narrations"), len(prompts)) if x]
+                    if narrs:
+                        out["narrations"] = narrs
+                    music = str(data.get("music") or "").strip()
+                    if music:
+                        out["music"] = music
+                    sfx = [x for x in _strlist(data.get("sfx"), len(prompts)) if x]
+                    if sfx:
+                        out["sfx"] = sfx
+                    return out
+        # Legacy shape: bare JSON array of prompt strings (pre-audio models /
+        # models that ignored the addendum) — unchanged behavior.
         m = _re.search(r'\[.*\]', raw, _re.DOTALL)
         if m:
             try:
@@ -204,19 +300,41 @@ def get_video(vid_id: int):
             raise HTTPException(status_code=404, detail="Video not found")
     return dict(row)
 
+def _run_video_then_audio(vid_id: int, music_prompt: str, narration: str):
+    """'Generate with audio' (opt-in): the normal generation, then the EXISTING
+    add_video_audio bridge on success — one background task; every model call
+    inside rides the unified GPU queue exactly as it does today."""
+    run_video_generation(vid_id)
+    conn = get_conn()
+    row = conn.execute("SELECT status FROM videos WHERE id=?", (vid_id,)).fetchone()
+    conn.close()
+    if row and row["status"] == "done":
+        conn = get_conn()
+        conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL WHERE id=?", (vid_id,))
+        conn.commit()
+        conn.close()
+        add_video_audio(vid_id, music_prompt, narration)
+
+
 @router.post("/api/videos/generate")
 def create_video(req: VideoRequest, background_tasks: BackgroundTasks):
+    check_video_vram_or_raise(req.model_id)   # fail fast if this model can't fit on the node's GPU
+    p = _resolve_video_params(req)
     conn = get_conn()
     c = conn.cursor()
     c.execute(
         "INSERT INTO videos (prompt,width,height,num_frames,steps,fps,seed,status,model_id) "
         "VALUES (?,?,?,?,?,?,?,'queued',?)",
-        (req.prompt, req.width, req.height, req.num_frames, req.steps, req.fps, req.seed, req.model_id),
+        (req.prompt, p["width"], p["height"], p["num_frames"], p["steps"], p["fps"], req.seed, req.model_id),
     )
     vid_id = c.lastrowid
     conn.commit()
     conn.close()
-    background_tasks.add_task(run_video_generation, vid_id)
+    if req.audio_enabled:
+        background_tasks.add_task(_run_video_then_audio, vid_id,
+                                  req.music_prompt.strip(), req.narration.strip())
+    else:
+        background_tasks.add_task(run_video_generation, vid_id)
     return {"id": vid_id, "status": "queued"}
 
 @router.delete("/api/videos/{vid_id}")
@@ -302,11 +420,54 @@ def retry_video(vid_id: int, background_tasks: BackgroundTasks):
     if row["status"] in ("queued", "generating"):
         conn.close()
         raise HTTPException(400, "Video is already running")
+    try:
+        check_video_vram_or_raise(row["model_id"])   # fail fast if this model can't fit on the node's GPU
+    except HTTPException:
+        conn.close()
+        raise
     conn.execute("UPDATE videos SET status='queued',error=NULL,video_path=NULL,updated_at=datetime('now') WHERE id=?", (vid_id,))
     conn.commit()
     conn.close()
     background_tasks.add_task(run_video_generation, vid_id)
     return {"ok": True, "status": "queued"}
+
+
+class ChainAudioRequest(BaseModel):
+    settings: dict | None = None   # None = keep the chain's stored settings/defaults
+
+
+@router.post("/api/video-chains/{chain_id}/audio")
+def chain_audio(chain_id: int, req: ChainAudioRequest, background_tasks: BackgroundTasks):
+    """Generate (or redo) the layered audio for a compiled chain: music bed +
+    TTS narration (+ optional SFX), mixed and muxed onto the compiled video →
+    video_chains.final_path. Runs the same engines as the studio audio path;
+    every model call rides the unified GPU queue."""
+    conn = get_conn()
+    chain = conn.execute(
+        "SELECT compiled_path,audio_status FROM video_chains WHERE id=?",
+        (chain_id,)).fetchone()
+    if not chain:
+        conn.close()
+        raise HTTPException(404, "Chain not found")
+    if not chain["compiled_path"] or not Path(chain["compiled_path"]).exists():
+        conn.close()
+        raise HTTPException(400, "Chain has no compiled video yet — compile it first")
+    if chain["audio_status"] in ("queued", "generating"):
+        conn.close()
+        raise HTTPException(400, "Chain audio is already generating")
+    if req.settings is not None:
+        conn.execute(
+            "UPDATE video_chains SET audio_enabled=1,audio_status='queued',audio_error=NULL,"
+            "audio_settings=?,updated_at=datetime('now') WHERE id=?",
+            (json.dumps(req.settings), chain_id))
+    else:
+        conn.execute(
+            "UPDATE video_chains SET audio_enabled=1,audio_status='queued',audio_error=NULL,"
+            "updated_at=datetime('now') WHERE id=?", (chain_id,))
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(render_chain_audio, chain_id)
+    return {"ok": True, "message": "Generating chain audio…"}
 
 
 @router.post("/api/video-chains/{chain_id}/cancel")

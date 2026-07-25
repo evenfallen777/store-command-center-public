@@ -2,9 +2,15 @@
    Split out of tab-world.js for modularity. Runs in shared global scope
    (classic script, not a module) — same as world-map.js / world-assets.js. */
 
-/* Small deterministic per-agent offset so co-located agents don't fully overlap. */
+/* Small deterministic per-agent offset so co-located agents don't fully overlap.
+   Decorrelated hash fan-out (not id%5, which only gave 5 distinct offsets for
+   39 agents and stacked every 5th agent pixel-perfect on top of each other):
+   spread ~6-20px out at a per-agent angle so a crowd reads as a crowd. */
 function _spriteOffset(a) {
-  return { x: ((a.id * 7) % 5 - 2) * 5, y: ((a.id * 3) % 5 - 2) * 5 };
+  const h = (a.id * 2654435761) >>> 0;                 // Knuth multiplicative hash
+  const ang = (h % 360) * Math.PI / 180;
+  const rad = 6 + ((h >>> 9) % 14);
+  return { x: Math.cos(ang) * rad, y: Math.sin(ang) * rad };
 }
 
 /* How fast an agent ambles — matched to what they're doing so the motion reads
@@ -24,7 +30,9 @@ function _stepAgents(dt) {
     if (s.path && s.path.length) {
       const next = s.path[0], tp = WM.tileToPx(next.col, next.row);
       const last = s.path.length === 1;
-      const tx = tp.x + (last ? s.off.x : 0), ty = tp.y + (last ? s.off.y : 0);
+      // apply a fraction of the offset en route too, not just on arrival — otherwise
+      // a cohort walking the same route overlaps pixel-for-pixel until the last tile
+      const tx = tp.x + (last ? s.off.x : s.off.x * 0.35), ty = tp.y + (last ? s.off.y : s.off.y * 0.35);
       const dx = tx - s.px, dy = ty - s.py, dist = Math.hypot(dx, dy);
       if (Math.abs(dx) > Math.abs(dy) + 0.5) s.dir = dx < 0 ? 'left' : 'right';
       else if (Math.abs(dy) > 0.5) s.dir = dy < 0 ? 'up' : 'down';

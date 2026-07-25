@@ -11,8 +11,8 @@ const _GMODES = {
   path:    { icon: '🔗', label: 'Path',    ep: '/api/graph/path',     field: null,   ph: '' },
 };
 
-async function renderGraph() {
-  document.getElementById('main-content').innerHTML = `
+async function renderGraph(mount = 'main-content') {
+  document.getElementById(mount).innerHTML = `
     <div class="view-header">
       <h1>🕸️ Knowledge Graph</h1>
       <div class="view-sub">A queryable map of the whole codebase + docs (Graphify) — ask it, trace connections, see impact. OpenClaw can query it too.</div>

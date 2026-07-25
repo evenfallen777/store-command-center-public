@@ -35,12 +35,18 @@ def update_etsy_listing(listing_id: int, req: UpdateListingRequest):
 
 @router.get("/api/etsy/status")
 def etsy_status():
+    import etsy_client as _ec
     s = _get_etsy_settings()
+    auth = _ec.auth_state()
     return {
         "has_key":   bool(s.get("etsy_key")),
         "connected": bool(s.get("etsy_access_token")),
         "has_shop":  bool(s.get("etsy_shop_id")),
         "shop_id":   s.get("etsy_shop_id", ""),
+        # Stale OAuth (refresh rejected with 400/401): the UI shows a
+        # "Reconnect Etsy" CTA that re-runs GET /api/etsy/connect.
+        "needs_reconnect": bool(s.get("etsy_access_token")) and auth["needs_reconnect"],
+        "reconnect_reason": auth["reason"],
     }
 
 @router.get("/api/etsy/connect")
@@ -83,6 +89,8 @@ def etsy_callback(code: str = None, state: str = None, error: str = None):
         conn.execute("DELETE FROM settings WHERE key IN ('etsy_pkce_verifier','etsy_pkce_state')")
         conn.commit()
         conn.close()
+        import etsy_client as _ec
+        _ec.mark_auth_ok()   # fresh OAuth — clear any reconnect-needed state
         return HTMLResponse("""
         <html><body style="font-family:sans-serif;text-align:center;padding:60px;background:#111;color:#eee">
         <h2>✅ Etsy Connected!</h2>
@@ -99,6 +107,8 @@ def etsy_disconnect():
     conn.execute("DELETE FROM settings WHERE key IN ('etsy_access_token','etsy_refresh_token','etsy_token_expires')")
     conn.commit()
     conn.close()
+    import etsy_client as _ec
+    _ec.mark_auth_ok()   # disconnected shows "Not connected", not "reconnect needed"
     return {"ok": True}
 
 class EtsyPublishRequest(BaseModel):
@@ -111,6 +121,10 @@ class EtsyPublishRequest(BaseModel):
 
 @router.post("/api/etsy/publish")
 def publish_to_etsy(req: EtsyPublishRequest, background_tasks: BackgroundTasks):
+    import etsy_client as _ec
+    if _ec.auth_needs_reconnect():
+        # Fail fast instead of queueing a background publish doomed to a raw 400.
+        raise HTTPException(409, "Etsy authorization expired — reconnect Etsy in Settings.")
     conn   = get_conn()
     design = conn.execute("SELECT * FROM designs WHERE id=?", (req.design_id,)).fetchone()
     if not design:

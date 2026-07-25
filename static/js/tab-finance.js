@@ -6,7 +6,7 @@
      🏦 Overview — net-worth strip built from the other panes' APIs
      📆 Bills    — real household bills, due dates & payments (tab-bills.js renderBills)
      🏛️ Treasury — the national reserve (tab-treasury.js renderTreasury)
-     💵 Missions & Earn — money missions + Cash App (tab-money.js renderMoney)
+     💵 Missions & Earn — money missions + Cash App + Donate card (tab-money.js renderMoney)
      👛 Wallets  — real mainnet light-wallets (tab-wallets.js renderWallets)
      📈 Markets  — crypto & markets w/ its own nested sub-tabs (tab-crypto.js renderCrypto)
    Old view ids treasury/money/crypto/wallets still deep-link here (app-nav.js). */

@@ -3,7 +3,7 @@
 const API = '/store';
 
 let _currentView = 'dashboard';
-let _etsySubTab  = 'proposals'; // active subtab inside Etsy/Printify view
+let _etsySubTab  = 'dashboard'; // active subtab inside Etsy/Printify view (lands on the Dashboard)
 let _settings = {};
 let _publishDesignId = null;
 let _publishPrefillTitle = '', _publishPrefillDesc = '', _publishPrefillTags = '';
@@ -145,9 +145,29 @@ function statCard(label, value) {
     b.innerHTML = `🔑 <b>You're signed in with the default password (<code>store</code>)</b> — set your own now.
       <button style="background:#e8a13c;color:#231303;border:none;border-radius:6px;padding:4px 12px;font-weight:700;cursor:pointer"
         onclick="switchView('settings'); setTimeout(() => { if (window.settingsSub) settingsSub('system');
+          const pg = document.getElementById('password-group');
+          if (pg && 'open' in pg) pg.open = true;
           const el = document.getElementById('s-pw-cur');
           if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); } }, 300);">Change password</button>
       <span style="cursor:pointer;opacity:.7" title="dismiss until next reload" onclick="this.parentElement.remove()">✕</span>`;
     document.body.appendChild(b);
   } catch {}
 })();
+
+/* ── DONATE LINK (sidebar footer) ── shows the ☕ Support this project link only
+   when the owner set a Buy Me a Coffee handle AND flipped donate_enabled on
+   (Settings → Integrations → Donations). Same GET /api/donate/config the Money
+   tab card and the login page read — toggle off / no handle hides all of them.
+   settings-core.js calls refreshDonateLink() after a Donations save so the
+   sidebar updates without a reload. */
+async function refreshDonateLink() {
+  const el = document.getElementById('sidebar-donate');
+  if (!el) return;
+  try {
+    const d = await api('/api/donate/config');
+    if (d && d.enabled && d.url) { el.href = d.url; el.style.display = 'flex'; }
+    else { el.href = '#'; el.style.display = 'none'; }
+  } catch { el.style.display = 'none'; }
+}
+window.refreshDonateLink = refreshDonateLink;
+refreshDonateLink();

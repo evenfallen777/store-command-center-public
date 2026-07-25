@@ -24,9 +24,13 @@ from routers import (
     world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
     cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher as watcher_router,
     research, nsfw as nsfw_router, systems as systems_router,
-    health as health_router, pnl as pnl_router, games as games_router,
+    health as health_router, pnl as pnl_router, games as games_router, donate,
+    integrations as integrations_router, cloudflare as cloudflare_router,
+    studio as studio_router,
+    knowledge, livedocs, brands,
 )
 from routers import prompts as prompts_router   # /api/prompts — the prompt editor
+import docextract as docextract_router   # /api/extract — reusable photo->fields primitive
 
 app = FastAPI(title=f"{APP_NAME} API")
 
@@ -35,6 +39,12 @@ app = FastAPI(title=f"{APP_NAME} API")
 async def _auth_guard(request: Request, call_next):
     path = request.url.path
     if path in _AUTH_BYPASS:
+        return await call_next(request)
+    # Donate config: pre-auth surfaces (the login page's "☕ Support this project"
+    # button) need to know whether to render. Read-only and leaks nothing but
+    # {enabled, url} — the public Buy Me a Coffee link the owner chose to publish
+    # (routers/donate.py). GET only; no secrets ever flow through this route.
+    if path == "/api/donate/config" and request.method == "GET":
         return await call_next(request)
     # Public, token-guarded 3D asset route — Cults3D fetches these from the
     # internet with no session; the token in the URL is the access control.
@@ -142,6 +152,7 @@ async def startup():
         d.mkdir(parents=True, exist_ok=True)
     VIDEOS_DIR.mkdir(exist_ok=True)
     RESELL_UPLOADS.mkdir(parents=True, exist_ok=True)
+    DOCEXTRACT_UPLOADS.mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     reconcile_stuck_media()   # fail any video/chain orphaned by a previous restart
     try:
@@ -156,8 +167,17 @@ async def startup():
     world_ticker.start()   # The Company sim: advances the world independent of viewers
     import world_auto
     world_auto.start()     # The Company: autonomous creation → prayers (off until enabled)
+    import social_scheduler
+    social_scheduler.start()   # Social: auto-post due scheduled posts + analytics (off until enabled)
     money.start_auto()     # Money: 6h signal review + daily carpentry lead hunt (setting money_auto=off disables)
     oracle.start_auto()    # Oracle: resolve due forecasts + a daily tournament round (setting oracle_auto=off disables)
+    import engineers
+    engineers.start_auto()  # 🐙 The Engineers: autonomous dev-swarm proposer/auto-runner (setting engineers_auto=off disables)
+    import redteam, blueteam
+    redteam.start_auto()    # 🔴 Red-team: read-only static security auditor (setting redteam_enabled=off disables — inert while off)
+    blueteam.start_auto()   # 🔵 Blue-team: files fixes via the gated dev swarm (setting blueteam_enabled=off disables — inert while off)
+    import income_import
+    income_import.start()  # Income Phase 2: gated READ-ONLY income auto-import (income_autoimport_enabled, default OFF)
 
 # ─── STATIC MOUNTS ───────────────────────────────────────────────────────────
 class CachedStaticFiles(StaticFiles):
@@ -198,7 +218,8 @@ for _mod in (auth, dashboard, proposals, designs, generate, tasks, models,
              world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
              cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher_router, prompts_router,
              research, nsfw_router, systems_router, health_router, pnl_router,
-             games_router):
+             games_router, donate, integrations_router, cloudflare_router,
+             studio_router, docextract_router, knowledge, livedocs, brands):
     app.include_router(_mod.router)
 
 # ─── PLUGINS (drop-in, auto-discovered) ──────────────────────────────────────

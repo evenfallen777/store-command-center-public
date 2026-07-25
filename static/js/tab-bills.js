@@ -36,7 +36,7 @@ let _billSection = 'bills';   // bills|calendar|paychecks|purchases|budget|insig
 const _LEDGER_SECTIONS = [
   ['bills', '&#128198; Bills'],
   ['calendar', '&#128467;&#65039; Calendar'],
-  ['paychecks', '&#128176; Paychecks'],
+  ['paychecks', '&#128176; Income'],
   ['purchases', '&#128722; Purchases'],
   ['budget', '&#129518; Budget'],
   ['insights', '&#128200; Insights'],
@@ -469,7 +469,7 @@ function billOpenForm(id) {
           Custom fields ${hlp('Anything your bills need that the form does not have: account nickname, meter number, service address. Stored per bill.')}
         </div>
         <div id="bill-extra-rows"></div>
-        <button class="btn-sm" onclick="billAddExtraRow()">&#10133; custom field</button>
+        <button class="btn-sm" onclick="billAddExtraRow('bill-extra-rows')">&#10133; custom field</button>
       </div>
 
       <div style="display:flex;gap:8px;margin-top:14px;">
@@ -481,7 +481,7 @@ function billOpenForm(id) {
   const rows = document.getElementById('bill-extra-rows');
   const entries = Object.entries(b.extra || {});
   if (rows) rows.innerHTML = '';
-  entries.forEach(([k, v]) => billAddExtraRow(k, v));
+  entries.forEach(([k, v]) => billAddExtraRow('bill-extra-rows', k, v));
   wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 window.billOpenForm = billOpenForm;
@@ -501,8 +501,8 @@ function billCycleChanged() {
 }
 window.billCycleChanged = billCycleChanged;
 
-function billAddExtraRow(k, v) {
-  const rows = document.getElementById('bill-extra-rows');
+function billAddExtraRow(containerId, k, v) {
+  const rows = document.getElementById(containerId);
   if (!rows) return;
   const i = ++_billExtraSeq;
   const div = document.createElement('div');
@@ -523,9 +523,9 @@ function billAddExtraRow(k, v) {
 }
 window.billAddExtraRow = billAddExtraRow;
 
-function _billCollectExtra() {
+function _billCollectExtra(containerId) {
   const out = {};
-  document.querySelectorAll('#bill-extra-rows .bill-extra-row').forEach(r => {
+  document.querySelectorAll(`#${containerId} .bill-extra-row`).forEach(r => {
     const k = (r.querySelector('.bill-extra-k') || {}).value || '';
     const v = (r.querySelector('.bill-extra-v') || {}).value || '';
     if (k.trim()) out[k.trim()] = v.trim();
@@ -561,7 +561,7 @@ async function billSave() {
     due_day: dueDay,
     next_due: val('bill-f-nextdue') || null,
     autopay: !!(document.getElementById('bill-f-autopay') || {}).checked,
-    extra: _billCollectExtra(),
+    extra: _billCollectExtra('bill-extra-rows'),
   };
   try {
     if (_billEditId) {
@@ -699,8 +699,18 @@ window.addEventListener('resize', () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
-   💵 LEDGER — paychecks in, purchases out, and the overview that nets them.
+   💵 LEDGER — income in, purchases out, and the overview that nets them.
    Backend: app/routers/money/ledger.py
+
+   Income Phase 1 generalized "paychecks" into any-kind income, additively —
+   same `paychecks` table, plus income_type/currency/amount_native (manual entry
+   ONLY this phase; no external APIs). This pane now drives on the superset:
+     GET/POST      /api/ledger/income            every income row (+ ?type=,
+                                                   per-type totals) / create
+     PATCH/DELETE  /api/ledger/income/{id}
+   /api/ledger/paychecks (below) still exists, byte-for-byte back-compat, and
+   still backs the Export/Import CSV buttons (it has no WHERE clause, so it
+   already round-trips every income row, just without the new columns):
      GET/POST      /api/ledger/paychecks         list (+ month/YTD totals) / create
      PATCH/DELETE  /api/ledger/paychecks/{id}
      GET/POST      /api/ledger/purchases         list (+ totals + category split) / create
@@ -721,8 +731,21 @@ window.addEventListener('resize', () => {
    ══════════════════════════════════════════════════════════════════════════ */
 
 const PAY_CYCLES = ['weekly', 'biweekly', 'semimonthly', 'monthly', 'irregular'];
+// Keep in sync with INCOME_TYPES in app/routers/money/ledger.py.
+const INCOME_TYPES = [
+  ['paycheck', '&#128188; Paycheck'],
+  ['sale', '&#128722; Sale'],
+  ['refund', '&#8617;&#65039; Refund'],
+  ['gift', '&#127873; Gift'],
+  ['dividend', '&#128202; Dividend'],
+  ['interest', '&#127974;&#65039; Interest'],
+  ['crypto_receive', '&#8383; Crypto received'],
+  ['payout', '&#128184; Payout'],
+  ['other', '&#10024; Other'],
+];
+const _incomeTypeLabel = t => (INCOME_TYPES.find(([k]) => k === t) || [t, t || 'paycheck'])[1];
 
-let _paychecks = null;      // GET /api/ledger/paychecks   (null = did not answer)
+let _paychecks = null;      // GET /api/ledger/income   (null = did not answer)
 let _payEditId = null;
 let _purchases = null;      // GET /api/ledger/purchases   (null = did not answer)
 let _purEditId = null;
@@ -798,37 +821,40 @@ function _ledgerMonthLabel(ym) {
 async function _payRender() {
   const el = document.getElementById('bill-section-body');
   if (!el) return;
-  el.innerHTML = `<div class="empty"><div class="empty-icon">&#9203;</div>Loading paychecks&#8230;</div>`;
-  const r = await Promise.allSettled([api('/api/ledger/paychecks?limit=500')]);
+  el.innerHTML = `<div class="empty"><div class="empty-icon">&#9203;</div>Loading income&#8230;</div>`;
+  const r = await Promise.allSettled([api('/api/ledger/income?limit=500')]);
   if (!el.isConnected) return;
   _paychecks = r[0].status === 'fulfilled' ? r[0].value : null;
   el.innerHTML = _payHtml();
+  payLoadImports();   // fills #pay-imports; failure-tolerant (section stays hidden pre-restart)
 }
 
 function _payHtml() {
-  const head = _ledgerHead('&#128176; Paychecks',
-    `Money in: what each employer or client actually paid you, and when.
-     Hourly work can be entered as hours &times; your rate and the amount fills itself in
-     ${hlp('The rate lives on each paycheck, so different jobs and clients can carry different rates.')}`,
-    `<button class="btn-sm primary" onclick="payOpenForm()">&#10133; Add paycheck</button>
+  const head = _ledgerHead('&#128176; Income',
+    `Money in, any kind: paychecks, sales, refunds, gifts, dividends, crypto received &mdash;
+     whatever actually landed, and when. Hourly work can be entered as hours &times; your rate
+     and the amount fills itself in
+     ${hlp('The rate lives on each entry, so different jobs and clients can carry different rates. Besides manual entry, read-only importers (PayPal / Printify / on-chain) can pull income in — see the Income sources section below. They only ever record money IN; nothing here can spend.')}`,
+    `<button class="btn-sm primary" onclick="payOpenForm()">&#10133; Add income</button>
      <button class="btn-sm" onclick="payExportCsv()">&#8595; Export CSV</button>
      <button class="btn-sm" onclick="payImportCsv()">&#8593; Import CSV</button>
      <button class="btn-sm" onclick="renderBills()">&#8635; Refresh</button>` ) +
     `<input type="file" id="pay-csv-file" accept=".csv,text/csv" style="display:none;"
             onchange="payImportPicked(this)">`;
 
-  if (!_paychecks) return `${head}${_ledgerDegraded('Paychecks', 'renderBills()')}<div id="bill-form-wrap"></div>`;
+  if (!_paychecks) return `${head}${_ledgerDegraded('Income', 'renderBills()')}<div id="bill-form-wrap"></div>`;
 
-  const rows = _paychecks.paychecks || [];
+  const rows = _paychecks.income || [];
   if (!rows.length) {
     return `${head}
       <div class="empty" style="padding:46px 16px;">
         <div class="empty-icon">&#128176;</div>
         <div style="color:var(--muted);font-size:.86rem;max-width:460px;margin:0 auto;line-height:1.6;">
-          Log every paycheck and client payment here so the Overview can tell you what you
+          Log every paycheck, sale, refund or other income here so the Overview can tell you what you
           actually earned this month and this year.</div>
-        <div style="margin-top:12px;"><button class="btn-sm primary" onclick="payOpenForm()">&#10133; Add paycheck</button></div>
+        <div style="margin-top:12px;"><button class="btn-sm primary" onclick="payOpenForm()">&#10133; Add income</button></div>
       </div>
+      <div id="pay-imports"></div>
       <div id="bill-form-wrap"></div>`;
   }
 
@@ -838,7 +864,7 @@ function _payHtml() {
       <div class="stat-val" style="font-size:1.6rem;color:${color};">${val}</div>
       <div style="font-size:.66rem;color:var(--muted);margin-top:5px;">${sub || '&nbsp;'}</div>
     </div>`;
-  const n = c => `${c} paycheck${c === 1 ? '' : 's'}`;
+  const n = c => `${c} entr${c === 1 ? 'y' : 'ies'}`;
   const strip = `<div class="stats-row" style="margin:16px 0;">
     ${card('&#128197;', 'This month', billUSD(_paychecks.month_cents), 'var(--green)', n(_paychecks.month_count || 0))}
     ${card('&#128200;', 'Year to date', billUSD(_paychecks.ytd_cents), 'var(--green)', n(_paychecks.ytd_count || 0))}
@@ -846,13 +872,28 @@ function _payHtml() {
       'var(--text)', (_paychecks.sources || []).slice(0, 3).map(esc).join(', ') || 'none yet')}
   </div>`;
 
+  // Small per-type breakdown (voided rows already excluded by the backend).
+  const byType = (_paychecks.by_type || []).filter(t => t.total_cents || t.count);
+  const breakdown = byType.length ? `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;">
+      ${byType.map(t => `
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+                     padding:6px 12px;font-size:.74rem;display:flex;gap:8px;align-items:baseline;">
+          <span>${_incomeTypeLabel(t.income_type)}</span>
+          <b style="color:var(--green);">${billUSD(t.total_cents)}</b>
+          <span style="color:var(--muted);">${t.count}</span>
+        </div>`).join('')}
+    </div>` : '';
+
   const th = (t, extra) => `<th style="padding:7px 8px;${extra || ''}">${t}</th>`;
   const body = rows.map(p => {
     const hrs = (p.hours !== null && p.hours !== undefined)
       ? `${p.hours} h${p.hourly_rate_cents ? ` &times; ${billUSD(p.hourly_rate_cents)}` : ''}` : '';
     const extras = Object.keys(p.extra || {}).length;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const voided = !!p.voided;
+    return `<tr style="border-bottom:1px solid var(--border);${voided ? 'opacity:.5;' : ''}">
       <td style="padding:7px 8px;white-space:nowrap;">${esc(String(p.received_at || '').slice(0, 10))}</td>
+      <td style="padding:7px 8px;">${_billChip(_incomeTypeLabel(p.income_type || 'paycheck'), 'var(--accent2)')}${voided ? ' <span style="font-size:.64rem;color:var(--muted);">voided</span>' : ''}</td>
       <td style="padding:7px 8px;">
         <b>${esc(p.source || '')}</b>
         ${p.notes ? `<div style="font-size:.66rem;color:var(--muted);">${esc(p.notes)}</div>` : ''}
@@ -868,13 +909,14 @@ function _payHtml() {
       </td></tr>`;
   }).join('');
 
-  return `${head}${strip}
+  return `${head}${strip}${breakdown}
+    <div id="pay-imports"></div>
     <div id="bill-form-wrap"></div>
-    <div style="font-weight:600;font-size:.86rem;margin:6px 0;">${rows.length} paycheck${rows.length === 1 ? '' : 's'}, newest first</div>
+    <div style="font-weight:600;font-size:.86rem;margin:6px 0;">${rows.length} income entr${rows.length === 1 ? 'y' : 'ies'}, newest first</div>
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
         <thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border);">
-          ${th('Received')}${th('Source')}${th('Net', 'text-align:right;')}${th('Gross', 'text-align:right;')}
+          ${th('Received')}${th('Type')}${th('Source')}${th('Net', 'text-align:right;')}${th('Gross', 'text-align:right;')}
           ${th('Hours')}${th('Cycle')}${th('', 'text-align:right;')}
         </tr></thead>
         <tbody>${body}</tbody>
@@ -886,16 +928,23 @@ function payOpenForm(id) {
   const wrap = document.getElementById('bill-form-wrap');
   if (!wrap) return;
   _payEditId = (id === undefined || id === null) ? null : id;
-  const p = _payEditId ? (((_paychecks || {}).paychecks || []).find(x => x.id === _payEditId) || {}) : {};
+  const p = _payEditId ? (((_paychecks || {}).income || []).find(x => x.id === _payEditId) || {}) : {};
   const cycle = p.cycle || 'irregular';
+  const itype = p.income_type || 'paycheck';
 
   wrap.innerHTML = `
     <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;margin:12px 0;">
-      <div style="font-weight:700;margin-bottom:12px;">${_payEditId ? '&#9998; Edit paycheck' : '&#10133; New paycheck'}</div>
+      <div style="font-weight:700;margin-bottom:12px;">${_payEditId ? '&#9998; Edit income' : '&#10133; New income'}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;">
         <div class="field" style="margin:0;">
-          <label>Source ${hlp('The employer or client who paid you. Reused sources group your income in the totals.')}</label>
-          <input type="text" id="pay-f-source" value="${esc(p.source || '')}" placeholder="employer or client">
+          <label>Type ${hlp('What kind of income this is. Drives the per-type breakdown above.')}</label>
+          <select id="pay-f-type">
+            ${INCOME_TYPES.map(([k, label]) => `<option value="${k}"${itype === k ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="margin:0;">
+          <label>Source ${hlp('Who paid you — employer, client, marketplace, or person. Reused sources group your income in the totals.')}</label>
+          <input type="text" id="pay-f-source" value="${esc(p.source || '')}" placeholder="employer, client, Etsy, PayPal…">
         </div>
         <div class="field" style="margin:0;">
           <label>Received</label>
@@ -907,12 +956,12 @@ function payOpenForm(id) {
                  value="${(p.hours === null || p.hours === undefined) ? '' : p.hours}">
         </div>
         <div class="field" style="margin:0;">
-          <label>Hourly rate ${hlp('Your rate for THIS job. Stored per paycheck, so every client can be different.')}</label>
+          <label>Hourly rate ${hlp('Your rate for THIS job. Stored per entry, so every client can be different.')}</label>
           <input type="number" id="pay-f-rate" min="0" step="0.01" placeholder="per hour"
                  value="${(p.hourly_rate_cents === null || p.hourly_rate_cents === undefined) ? '' : (p.hourly_rate_cents / 100).toFixed(2)}">
         </div>
         <div class="field" style="margin:0;">
-          <label>Amount (net) ${hlp('What actually landed. Leave blank and press Fill to take hours times rate.')}</label>
+          <label>Amount (net) ${hlp('What actually landed, in USD. Leave blank and press Fill to take hours times rate.')}</label>
           <div style="display:flex;gap:6px;">
             <input type="number" id="pay-f-amount" min="0" step="0.01" placeholder="take-home"
                    value="${(p.amount_cents === null || p.amount_cents === undefined) ? '' : (p.amount_cents / 100).toFixed(2)}">
@@ -938,21 +987,21 @@ function payOpenForm(id) {
 
       <div style="margin-top:12px;">
         <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">
-          Custom fields ${hlp('Anything else this paycheck needs: invoice number, job site, check number.')}
+          Custom fields ${hlp('Anything else this entry needs: invoice number, job site, check number, order id.')}
         </div>
-        <div id="bill-extra-rows"></div>
-        <button class="btn-sm" onclick="billAddExtraRow()">&#10133; custom field</button>
+        <div id="pay-extra-rows"></div>
+        <button class="btn-sm" onclick="billAddExtraRow('pay-extra-rows')">&#10133; custom field</button>
       </div>
 
       <div style="display:flex;gap:8px;margin-top:14px;">
-        <button class="btn-sm primary" onclick="paySave()">&#128190; ${_payEditId ? 'Save' : 'Add paycheck'}</button>
+        <button class="btn-sm primary" onclick="paySave()">&#128190; ${_payEditId ? 'Save' : 'Add income'}</button>
         <button class="btn-sm" onclick="billCloseForm()">Cancel</button>
       </div>
     </div>`;
 
-  const rows = document.getElementById('bill-extra-rows');
+  const rows = document.getElementById('pay-extra-rows');
   if (rows) rows.innerHTML = '';
-  Object.entries(p.extra || {}).forEach(([k, v]) => billAddExtraRow(k, v));
+  Object.entries(p.extra || {}).forEach(([k, v]) => billAddExtraRow('pay-extra-rows', k, v));
   wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 window.payOpenForm = payOpenForm;
@@ -988,6 +1037,7 @@ async function paySave() {
 
   const payload = {
     source,
+    income_type: _ledgerVal('pay-f-type') || 'paycheck',
     amount_cents: amount,
     gross_cents: gross,
     received_at: _ledgerVal('pay-f-date') || null,
@@ -995,29 +1045,29 @@ async function paySave() {
     hourly_rate_cents: rate,
     cycle: _ledgerVal('pay-f-cycle') || 'irregular',
     notes: _ledgerVal('pay-f-notes'),
-    extra: _billCollectExtra(),
+    extra: _billCollectExtra('pay-extra-rows'),
   };
   try {
     if (_payEditId) {
-      await api(`/api/ledger/paychecks/${_payEditId}`, { method: 'PATCH', body: JSON.stringify(payload) });
-      toast('Paycheck saved');
+      await api(`/api/ledger/income/${_payEditId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+      toast('Income saved');
     } else {
-      await api('/api/ledger/paychecks', { method: 'POST', body: JSON.stringify(payload) });
-      toast('Paycheck added');
+      await api('/api/ledger/income', { method: 'POST', body: JSON.stringify(payload) });
+      toast('Income added');
     }
     billCloseForm();
     await renderBills();
-  } catch (e) { toast(e.message || 'Could not save that paycheck', 'error'); }
+  } catch (e) { toast(e.message || 'Could not save that income entry', 'error'); }
 }
 window.paySave = paySave;
 
 async function payDelete(id) {
-  if (!confirm('Delete this paycheck from the ledger?')) return;
+  if (!confirm('Delete this income entry from the ledger?')) return;
   try {
-    await api(`/api/ledger/paychecks/${id}`, { method: 'DELETE' });
-    toast('Paycheck deleted');
+    await api(`/api/ledger/income/${id}`, { method: 'DELETE' });
+    toast('Income entry deleted');
     await renderBills();
-  } catch (e) { toast(e.message || 'Could not delete that paycheck', 'error'); }
+  } catch (e) { toast(e.message || 'Could not delete that income entry', 'error'); }
 }
 window.payDelete = payDelete;
 
@@ -1034,6 +1084,163 @@ function payImportPicked(input) {
   _ledgerImportPicked(input, '/api/ledger/paychecks/import', 'paycheck');
 }
 window.payImportPicked = payImportPicked;
+
+/* ── Income Phase 2: READ-ONLY importers (PayPal / Printify / on-chain) ─────
+   Backend: app/income_import.py + routers/money/income_sources.py.
+     GET  /api/income/import/status      per-source connected/last-run state
+     POST /api/income/import/{source}    manual "Import now"
+   Credentials save through the existing PATCH /api/settings (SECRET_KEYS
+   auto-encrypts them at rest; saved secrets are never echoed back here — the
+   inputs just show "(saved)"). The wallet address is PUBLIC — read-only
+   visibility, never a key. The auto-import daemon is gated by the
+   income_autoimport_enabled setting and defaults OFF; "Import now" always
+   works. Nothing in this section can move money — money IN only. */
+
+let _payImports = null;   // last GET /api/income/import/status payload
+
+async function payLoadImports() {
+  const el = document.getElementById('pay-imports');
+  if (!el) return;
+  try { _payImports = await api('/api/income/import/status'); }
+  catch { el.innerHTML = ''; return; }   // pre-restart 404 → section simply absent
+  el.innerHTML = _payImportsHtml(_payImports);
+}
+window.payLoadImports = payLoadImports;
+
+function _payImpStatusLine(st) {
+  if (!st) return '<span style="color:var(--muted);">&mdash;</span>';
+  if (st.running) return '<span style="color:var(--accent2);">&#9203; importing&#8230;</span>';
+  if (!st.last_run_at) return '<span style="color:var(--muted);">never imported</span>';
+  const when = esc(String(st.last_run_at).slice(0, 16).replace('T', ' '));
+  if (st.last_error) {
+    return `<span style="color:var(--warn);" title="${esc(st.last_error)}">&#9888;&#65039; ${when} &mdash; ${esc(String(st.last_error).slice(0, 70))}</span>`;
+  }
+  return `<span style="color:var(--muted);">last ${when} &mdash; <b style="color:var(--green);">+${st.last_added || 0}</b> new of ${st.last_seen || 0} seen</span>`;
+}
+
+function _payImpChip(connected) {
+  return connected
+    ? '<span style="color:var(--green,#22c55e);font-weight:600;font-size:.72rem;">connected</span>'
+    : '<span style="color:var(--muted);font-size:.72rem;">not connected</span>';
+}
+
+function _payImpCard(title, hint, chip, statusLine, fieldsHtml, source, canImport) {
+  return `
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+        <div style="font-weight:600;font-size:.86rem;">${title} ${hlp(hint)} ${chip}</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button class="btn-sm" onclick="payImpSave('${source}')">&#128190; Save</button>
+          <button class="btn-sm primary" id="pay-imp-run-${source}" onclick="payImpRun('${source}')" ${canImport ? '' : 'disabled'}
+            title="Pull new income records from this source now (read-only; duplicates are skipped).">&#8595; Import now</button>
+        </div>
+      </div>
+      <div style="font-size:.74rem;margin:6px 0 8px;">${statusLine}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">${fieldsHtml}</div>
+    </div>`;
+}
+
+function _payImportsHtml(d) {
+  const s = (d || {}).sources || {};
+  const pp = s.paypal || {}, pf = s.printify || {}, oc = s.onchain || {};
+  const field = (label, inner) => `
+    <div class="field" style="margin:0;flex:1;min-width:170px;">
+      <label style="font-size:.7rem;">${label}</label>${inner}
+    </div>`;
+  const paypalFields =
+    field('Client ID', `<input type="password" id="pay-imp-pp-id" placeholder="${pp.configured ? '(saved — enter to replace)' : 'PayPal REST client id'}">`) +
+    field('Client secret', `<input type="password" id="pay-imp-pp-secret" placeholder="${pp.configured ? '(saved — enter to replace)' : 'PayPal REST secret'}">`) +
+    `<div class="field" style="margin:0;width:110px;">
+      <label style="font-size:.7rem;">Mode</label>
+      <select id="pay-imp-pp-mode">
+        <option value="live" ${pp.mode !== 'sandbox' ? 'selected' : ''}>live</option>
+        <option value="sandbox" ${pp.mode === 'sandbox' ? 'selected' : ''}>sandbox</option>
+      </select></div>`;
+  const printifyFields =
+    field('API key', `<input type="password" id="pay-imp-pf-key" placeholder="${pf.configured ? '(saved — enter to replace)' : 'Printify personal access token'}">`) +
+    field('Shop ID', `<input type="text" id="pay-imp-pf-shop" value="${esc(pf.shop_id || '')}" placeholder="blank = first shop">`);
+  const onchainFields =
+    field('Public wallet address', `<input type="text" id="pay-imp-oc-addr" value="${esc(oc.address || '')}" placeholder="bc1q… / 0x…">`) +
+    `<div class="field" style="margin:0;width:110px;">
+      <label style="font-size:.7rem;">Chain</label>
+      <select id="pay-imp-oc-chain">
+        <option value="btc" ${oc.chain !== 'eth' ? 'selected' : ''}>BTC</option>
+        <option value="eth" ${oc.chain === 'eth' ? 'selected' : ''}>ETH</option>
+      </select></div>`;
+  return `
+    <details class="settings-group" style="margin:0 0 16px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:.9rem;">&#8595; Income sources
+        <span style="font-size:.72rem;color:var(--muted);font-weight:400;">(read-only importers &mdash; money in only)</span>
+      </summary>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 10px;">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-size:.78rem;"
+          title="OFF (default): sources are only pulled when you press Import now. ON: a background daemon re-imports each connected source on the interval. Importing only READS from each source and records income rows — it can never spend, withdraw or transfer.">
+          <input type="checkbox" ${d && d.enabled ? 'checked' : ''} onchange="payImpToggle(this.checked)">
+          Auto-import every ${d ? d.interval_min : 360} min
+        </label>
+        <span style="font-size:.7rem;color:var(--muted);">Duplicates are skipped automatically (each record is remembered by its transaction id).</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${_payImpCard('&#128179; PayPal',
+          'Pulls COMPLETED incoming USD transactions from the PayPal Reporting API (last ~30 days) and records the net (after PayPal fees) as sale income. Needs a REST app client id + secret from developer.paypal.com. Read-only: the reporting API cannot move money.',
+          _payImpChip(pp.configured), _payImpStatusLine(pp), paypalFields, 'paypal', !!pp.configured)}
+        ${_payImpCard('&#128085; Printify',
+          'Pulls recent orders from the Printify API and records the per-order net (retail total minus production cost) as sale income. Uses the importer key if set, else the existing Printify key from Settings. Read-only.',
+          _payImpChip(pf.configured), _payImpStatusLine(pf), printifyFields, 'printify', !!pf.configured)}
+        ${_payImpCard('&#9939; On-chain',
+          'Watches ONE public wallet address via a public block explorer (mempool.space for BTC, Blockscout for ETH — no API key) and records confirmed incoming transactions as crypto income, valued at the USD spot price at import time. The address is public read-only data — no private key is ever stored here.',
+          _payImpChip(oc.configured), _payImpStatusLine(oc), onchainFields, 'onchain', !!oc.configured)}
+      </div>
+    </details>`;
+}
+
+async function payImpToggle(on) {
+  try {
+    await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ income_autoimport_enabled: on ? '1' : '0' }) });
+    toast(on ? '⏱️ Auto-import ON — connected sources pull on the interval'
+             : 'Auto-import OFF — Import now still works anytime');
+    await payLoadImports();
+  } catch (e) { toast('Could not change auto-import: ' + e.message, 'error'); await payLoadImports(); }
+}
+window.payImpToggle = payImpToggle;
+
+async function payImpSave(source) {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim();
+  const body = {};
+  if (source === 'paypal') {
+    const id = v('pay-imp-pp-id'), sec = v('pay-imp-pp-secret');
+    if (id) body.paypal_client_id = id;          // never blank out a saved secret
+    if (sec) body.paypal_client_secret = sec;
+    body.paypal_mode = v('pay-imp-pp-mode') || 'live';
+  } else if (source === 'printify') {
+    const key = v('pay-imp-pf-key');
+    if (key) body.printify_api_key = key;
+    body.printify_shop_id = v('pay-imp-pf-shop');
+  } else if (source === 'onchain') {
+    body.income_wallet_address = v('pay-imp-oc-addr');
+    body.income_wallet_chain = v('pay-imp-oc-chain') || 'btc';
+  } else return;
+  try {
+    await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
+    toast('💾 Saved — credentials are encrypted at rest');
+    await payLoadImports();
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+window.payImpSave = payImpSave;
+
+async function payImpRun(source) {
+  const btn = document.getElementById(`pay-imp-run-${source}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Importing…'; }
+  try {
+    const r = await api(`/api/income/import/${source}`, { method: 'POST', body: JSON.stringify({}) });
+    if (r.error) toast(`${source}: ${r.error}`, 'error');
+    else toast(`⬇️ ${source}: ${r.added || 0} new income row${(r.added || 0) === 1 ? '' : 's'} (${r.seen || 0} seen)`);
+    if (r.added) { await renderBills(); return; }   // re-render shows the new rows + totals
+  } catch (e) { toast(`${source} import failed: ` + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.innerHTML = '&#8595; Import now'; }
+  await payLoadImports();
+}
+window.payImpRun = payImpRun;
 
 /* ══ PURCHASES ═══════════════════════════════════════════════════════════ */
 
@@ -1064,6 +1271,7 @@ function _purHtml() {
 
   // Quick-add: one row, date already set to today, Enter saves from any field.
   const cats = Array.from(new Set([
+    'Gas/Fuel',   // always offered — what 📷 Snap a receipt sets for fuel purchases
     ...((_purchases.month_categories || []).map(c => c.cat).filter(c => c && c !== 'uncategorized')),
     ...(_bills || []).map(b => b.category).filter(Boolean),
   ])).sort();
@@ -1084,7 +1292,10 @@ function _purHtml() {
           <datalist id="pur-cat-list">${cats.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist></div>
         <button class="btn-sm primary" onclick="purQuickAdd()" style="margin-bottom:2px;">&#10133; Add</button>
       </div>
-      <div style="margin-top:8px;"><button class="btn-sm" onclick="purOpenForm()">More fields&#8230;</button></div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn-sm" onclick="purOpenForm()">More fields&#8230;</button>
+        <button class="btn-sm" onclick="purSnapReceipt()">&#128247; Snap a receipt</button>
+      </div>
     </div>`;
 
   const rows = _purchases.purchases || [];
@@ -1204,7 +1415,10 @@ function purOpenForm(id) {
 
   wrap.innerHTML = `
     <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;margin:12px 0;">
-      <div style="font-weight:700;margin-bottom:12px;">${_purEditId ? '&#9998; Edit purchase' : '&#10133; New purchase'}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <div style="font-weight:700;">${_purEditId ? '&#9998; Edit purchase' : '&#10133; New purchase'}</div>
+        ${_purEditId ? '' : '<button class="btn-sm" onclick="purSnapReceipt()">&#128247; Snap a receipt</button>'}
+      </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;">
         <div class="field" style="margin:0;"><label>Date</label>
           <input type="date" id="pur-f-date" value="${esc(String(p.purchased_at || '').slice(0, 10) || _billTodayISO())}"></div>
@@ -1229,8 +1443,8 @@ function purOpenForm(id) {
         <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">
           Custom fields ${hlp('Anything else worth keeping: receipt number, job it belongs to, warranty date.')}
         </div>
-        <div id="bill-extra-rows"></div>
-        <button class="btn-sm" onclick="billAddExtraRow()">&#10133; custom field</button>
+        <div id="pur-extra-rows"></div>
+        <button class="btn-sm" onclick="billAddExtraRow('pur-extra-rows')">&#10133; custom field</button>
       </div>
 
       <div style="display:flex;gap:8px;margin-top:14px;">
@@ -1239,9 +1453,9 @@ function purOpenForm(id) {
       </div>
     </div>`;
 
-  const rows = document.getElementById('bill-extra-rows');
+  const rows = document.getElementById('pur-extra-rows');
   if (rows) rows.innerHTML = '';
-  Object.entries(p.extra || {}).forEach(([k, v]) => billAddExtraRow(k, v));
+  Object.entries(p.extra || {}).forEach(([k, v]) => billAddExtraRow('pur-extra-rows', k, v));
 
   // Remembered items + their measured cadences load in the background: the form
   // is usable immediately and the autocomplete/hints fill in a moment later, so a
@@ -1259,6 +1473,58 @@ function purOpenForm(id) {
 }
 window.purOpenForm = purOpenForm;
 
+/* ── 📷 Snap a receipt — first consumer of the reusable docExtract() widget ────
+   (static/js/doc-extract.js, backend app/docextract.py schema 'receipt'). Opens
+   the purchase form (so the pur-f-* fields exist), then a camera/file picker;
+   on success pre-fills merchant/date/amount/method/category and any line items.
+   The manual quick-add / form flow is untouched — this only ever fills fields in,
+   never submits on its own, so the user still reviews before saving. */
+function purSnapReceipt() {
+  if (!document.getElementById('pur-f-merchant')) purOpenForm();
+  docExtract({
+    schema: 'receipt',
+    onResult: purApplyExtract,
+    onError: (e) => toast('Could not read that receipt: ' + (e.message || e), 'error'),
+  });
+}
+window.purSnapReceipt = purSnapReceipt;
+
+function purApplyExtract(data) {
+  data = data || {};
+  const set = (id, v) => {
+    const el = document.getElementById(id);
+    if (el && v !== undefined && v !== null && v !== '') el.value = v;
+  };
+  set('pur-f-merchant', data.merchant);
+  if (data.date) set('pur-f-date', data.date);
+  if (typeof data.total === 'number' && isFinite(data.total)) set('pur-f-amount', data.total.toFixed(2));
+  set('pur-f-method', data.payment_method);
+  const catEl = document.getElementById('pur-f-category');
+  if (catEl) catEl.value = data.is_fuel ? 'Gas/Fuel' : (catEl.value || (data.category || ''));
+
+  const noteBits = [];
+  if (typeof data.tax === 'number' && isFinite(data.tax) && data.tax > 0) noteBits.push(`tax ${billUSD(Math.round(data.tax * 100))}`);
+  if (data.is_fuel && typeof data.gallons === 'number' && isFinite(data.gallons)) noteBits.push(`${data.gallons} gal`);
+  if (noteBits.length) {
+    const notesEl = document.getElementById('pur-f-notes');
+    if (notesEl) notesEl.value = notesEl.value ? `${notesEl.value} — ${noteBits.join(', ')}` : noteBits.join(', ');
+  }
+
+  (data.line_items || []).forEach(li => {
+    const isFuel = /gas|fuel/i.test(li.category || '');
+    purAddItemRow({
+      name: (isFuel ? '⛽ ' : '') + (li.description || 'item'),
+      qty: li.qty || 1,
+      unit: '',
+      unit_price_cents: typeof li.unit_price === 'number' ? Math.round(li.unit_price * 100)
+        : (typeof li.amount === 'number' ? Math.round(li.amount * 100) : undefined),
+    });
+  });
+  purItemsRecalc();
+  toast('Receipt fields filled in — check them, then save');
+}
+window.purApplyExtract = purApplyExtract;
+
 async function purSave() {
   const merchant = _ledgerVal('pur-f-merchant');
   if (!merchant) { toast('Where did you spend it?', 'error'); return; }
@@ -1275,7 +1541,7 @@ async function purSave() {
     category: _ledgerVal('pur-f-category'),
     method: _ledgerVal('pur-f-method'),
     notes: _ledgerVal('pur-f-notes'),
-    extra: _billCollectExtra(),
+    extra: _billCollectExtra('pur-extra-rows'),
     items,
   };
   if (amount === null) delete payload.amount_cents;
@@ -1400,10 +1666,10 @@ function _ovHtml() {
       <div class="empty" style="padding:46px 16px;">
         <div class="empty-icon">&#128202;</div>
         <div style="color:var(--muted);font-size:.86rem;max-width:470px;margin:0 auto;line-height:1.6;">
-          Nothing to net out yet. Add paychecks and purchases, or mark a bill paid, and this
+          Nothing to net out yet. Add income and purchases, or mark a bill paid, and this
           becomes your month-by-month picture of income against everything going out.</div>
         <div style="margin-top:12px;display:flex;gap:6px;justify-content:center;">
-          <button class="btn-sm primary" onclick="billSection('paychecks')">&#128176; Add a paycheck</button>
+          <button class="btn-sm primary" onclick="billSection('paychecks')">&#128176; Add income</button>
           <button class="btn-sm" onclick="billSection('purchases')">&#128722; Log a purchase</button>
         </div>
       </div>`;

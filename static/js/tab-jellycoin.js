@@ -431,9 +431,16 @@ async function _jlyRenderJoined(pane, st) {
         <b>separate coin</b> from ${esc(home)}'s. What you've earned on their chain stays on their chain.
       </div>
       <button class="btn-sm" style="margin-top:8px;" onclick="jellySetMode('host')">🏠 Found my own chain</button>
+    </div>
+
+    <!-- Peers (the JLY peer network) — moved here from Settings → Integrations. -->
+    <div class="settings-group" style="margin-bottom:16px;" id="peers-slot">
+      <div class="settings-group-title">🤝 Peers</div>
+      <div style="font-size:.78rem;color:var(--muted);">Loading&hellip;</div>
     </div>`;
 
   jellyJoinCmd();
+  if (typeof loadPeers === 'function') loadPeers();   // fill the 🤝 Peers slot (settings-peers.js)
 }
 
 async function cryptoLoadJelly() {
@@ -593,7 +600,7 @@ async function cryptoLoadJelly() {
         These are separate chains, not one shared ledger — a balance here can't be spent on your own network.
         It buys AI compute and reviews <i>on that buddy's node</i>.
       </div>`
-      : `<div style="font-size:.78rem;color:var(--muted);">No paired buddies yet. Pair one in <b>Settings → Peers</b>, then your balance on their chain shows up here.</div>`}
+      : `<div style="font-size:.78rem;color:var(--muted);">No paired buddies yet. Pair one in the <b>🤝 Peers</b> section below, then your balance on their chain shows up here.</div>`}
     </div>` : ''}
 
     <div class="settings-group" style="margin-bottom:16px;">
@@ -604,7 +611,7 @@ async function cryptoLoadJelly() {
         every block your shares helped find.
       </div>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
-        <div class="field" style="margin:0;"><label>Buddy's node ${hlp('Paired buddies from Settings → Peers. Pick "custom" to type any node URL.')}</label>
+        <div class="field" style="margin:0;"><label>Buddy's node ${hlp('Paired buddies from the 🤝 Peers section below. Pick "custom" to type any node URL.')}</label>
           <select id="jly-join-peer" onchange="jellyJoinCmd()" style="min-width:150px;">
             ${paired.length ? paired.map(p => `<option value="${esc(p.base_url || '')}">${esc(p.name)}</option>`).join('') : ''}
             <option value="">— custom URL —</option>
@@ -640,8 +647,15 @@ async function cryptoLoadJelly() {
             </select></div>
           <button class="btn-sm" onclick="jellySetMode('joined')" ${paired.length ? '' : 'disabled'}>🔗 Join this network</button>
         </div>
-        ${paired.length ? '' : `<div style="font-size:.72rem;color:var(--muted);margin-top:6px;">Pair a buddy in <b>Settings → Peers</b> first.</div>`}
+        ${paired.length ? '' : `<div style="font-size:.72rem;color:var(--muted);margin-top:6px;">Pair a buddy in the <b>🤝 Peers</b> section below first.</div>`}
       </div>
+    </div>
+
+    <!-- Peers (the JLY peer network) — moved here from Settings → Integrations.
+         settings-peers.js owns loadPeers() + every peer handler; it fills this slot. -->
+    <div class="settings-group" style="margin-bottom:16px;" id="peers-slot">
+      <div class="settings-group-title">🤝 Peers</div>
+      <div style="font-size:.78rem;color:var(--muted);">Loading&hellip;</div>
     </div>
 
     ${pool ? `<div class="settings-group" style="margin-bottom:16px;">
@@ -779,6 +793,7 @@ async function cryptoLoadJelly() {
     </div>`;
 
   jellyJoinCmd();   // fill the join command from the pre-selected buddy
+  if (typeof loadPeers === 'function') loadPeers();   // fill the 🤝 Peers slot (settings-peers.js)
 }
 window.cryptoLoadJelly = cryptoLoadJelly;
 

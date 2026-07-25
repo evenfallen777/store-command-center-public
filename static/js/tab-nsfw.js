@@ -83,6 +83,38 @@ function _nsfwFileUrl(p) {
 let _nsfwCats = [];
 let _nsfwCatFilter = '';
 let _nsfwCatsOpen = false;
+let _nsfwModelOptions = '<option value="">Default Model</option>';
+let _nsfwImageModel = '';
+let _nsfwVideoModels = [];
+let _nsfwAudioEngines = [];
+let _nsfwGenModels = [];
+
+function _nsfwVideoModelOptionsHtml() {
+  return _nsfwVideoModels.length
+    ? _nsfwVideoModels.map(m => `<option value="${esc(m.model_id)}"${m.model_id === 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers' ? ' selected' : ''}>${esc(m.label)}</option>`).join('')
+    : '<option value="Wan-AI/Wan2.1-T2V-1.3B-Diffusers">Wan2.1 T2V 1.3B (Default)</option>';
+}
+
+function _nsfwAudioEngineOptionsHtml() {
+  return _nsfwAudioEngines.length
+    ? _nsfwAudioEngines.map(e => `<option value="${esc(e.key)}"${e.key === 'musicgen' ? ' selected' : ''}>${esc(e.label)}</option>`).join('')
+    : '<option value="musicgen">MusicGen (instrumental, fast)</option>';
+}
+
+// Per-engine length options (seconds) — mirrors tab-audio.js's _AUD_DURATIONS.
+const _NSFW_AUD_DURATIONS = {
+  musicgen:     { opts: [5, 8, 15, 30, 45, 60], rec: 8 },
+  musicgen_med: { opts: [5, 8, 15, 30, 45, 60], rec: 8 },
+  stable_audio: { opts: [8, 15, 30, 47],         rec: 30 },
+  acestep:      { opts: [30, 60, 90, 120, 150, 180, 210, 240], rec: 120 },
+};
+function _nsfwFmtSecs(s) { return s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? (' ' + (s % 60) + 's') : ''}` : `${s}s`; }
+
+function _nsfwGenModelOptionsHtml() {
+  return _nsfwGenModels.length
+    ? _nsfwGenModels.map(m => `<option value="${esc(m.key)}"${m.key === 'triposr' ? ' selected' : ''}>${esc(m.label)}${m.commercial === false ? ' ⚠️' : ''}</option>`).join('')
+    : '<option value="triposr">TripoSR (fast, default)</option>';
+}
 
 async function _renderNsfwSub() {
   const root = document.getElementById('nsfw-content');
@@ -92,12 +124,61 @@ async function _renderNsfwSub() {
   catch (e) { root.innerHTML = `<div class="empty">&#10060; ${esc(e.message)}</div>`; return; }
   if (_nsfwSub === 'image') {
     try { _nsfwCats = (await api('/api/nsfw/categories')).categories || []; } catch { _nsfwCats = []; }
+    try { _nsfwImageModel = (await api('/api/settings')).nsfw_image_model || ''; } catch { _nsfwImageModel = ''; }
+    try {
+      const data = await api('/api/models');
+      const installed = data.installed || [];
+      const rec = data.recommended || [];
+      const labelMap = {};
+      for (const m of rec) labelMap[m.filename] = m.label || m.filename;
+      _nsfwModelOptions = `<option value="" ${_nsfwImageModel ? '' : 'selected'}>Default Model</option>` +
+        installed.map(f => `<option value="${esc(f)}" ${f === _nsfwImageModel ? 'selected' : ''}>${esc(labelMap[f] || f)}</option>`).join('');
+    } catch {}
+  }
+  if (_nsfwSub === 'video') {
+    try {
+      const vms = await api('/api/video-models');
+      _nsfwVideoModels = (vms || []).filter(m => m.installed);
+    } catch { _nsfwVideoModels = []; }
+  }
+  if (_nsfwSub === 'audio') {
+    try { _nsfwAudioEngines = await api('/api/audio/engines'); } catch { _nsfwAudioEngines = []; }
+  }
+  if (_nsfwSub === '3d') {
+    try {
+      const gm = await api('/api/models3d/gen-models');
+      _nsfwGenModels = (gm || []).filter(m => m.installed);
+    } catch { _nsfwGenModels = []; }
   }
   const forms = {
     image: `
       <div class="card" style="margin-bottom:14px;">
         <label style="font-size:.78rem;">Prompt <span style="color:var(--muted);">(type a rough idea, Enhance expands it — edit before generating)</span></label>
         <textarea id="nsfw-prompt" rows="3" placeholder="Describe the image (adults only)&hellip;" style="width:100%;"></textarea>
+        <div style="margin-top:8px;">
+          <label style="font-size:.78rem;">&#127912; Image model <span style="color:var(--muted);">(blank = default)</span></label><br>
+          <select id="nsfw-model" onchange="nsfwModelChange(this.value)" style="padding:5px 8px;margin-top:2px;">${_nsfwModelOptions}</select>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:8px;">
+          <div>
+            <label style="font-size:.78rem;">Variations</label><br>
+            <select id="nsfw-variations" style="width:100%;padding:5px 8px;margin-top:2px;">
+              <option value="1">1 variation</option>
+              <option value="2">2 variations</option>
+              <option value="3" selected>3 variations</option>
+              <option value="4">4 variations</option>
+              <option value="6">6 variations</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:.78rem;">Quality (steps)</label><br>
+            <select id="nsfw-steps" style="width:100%;padding:5px 8px;margin-top:2px;">
+              <option value="15">15 &mdash; fast</option>
+              <option value="20" selected>20 &mdash; balanced</option>
+              <option value="30">30 &mdash; best quality</option>
+            </select>
+          </div>
+        </div>
         <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
           <button class="btn-sm" id="nsfw-enhance-btn" onclick="nsfwEnhance()">&#10024; Enhance</button>
           <button class="btn-sm primary" onclick="nsfwGenerate()">&#127912; Generate</button>
@@ -110,6 +191,40 @@ async function _renderNsfwSub() {
       <div class="card" style="margin-bottom:14px;">
         <label style="font-size:.78rem;">Prompt</label>
         <textarea id="nsfw-vprompt" rows="3" placeholder="Describe the video clip (adults only)&hellip;" style="width:100%;"></textarea>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:8px;">
+          <div>
+            <label style="font-size:.78rem;">&#127916; Model</label><br>
+            <select id="nsfw-vmodel" style="width:100%;padding:5px 8px;margin-top:2px;">${_nsfwVideoModelOptionsHtml()}</select>
+          </div>
+          <div>
+            <label style="font-size:.78rem;">Resolution</label><br>
+            <select id="nsfw-vres" style="width:100%;padding:5px 8px;margin-top:2px;">
+              <option value="832x480">832&times;480 (16:9 landscape)</option>
+              <option value="480x832">480&times;832 (9:16 portrait)</option>
+              <option value="512x512">512&times;512 (square)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:.78rem;">Duration</label><br>
+            <select id="nsfw-vframes" style="width:100%;padding:5px 8px;margin-top:2px;">
+              <option value="25">&sim;1.5s (25 frames)</option>
+              <option value="49" selected>&sim;3s (49 frames)</option>
+              <option value="81">&sim;5s (81 frames)</option>
+              <option value="121">&sim;7.5s (121 frames, slow)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:.78rem;">Quality (steps)</label><br>
+            <select id="nsfw-vsteps" style="width:100%;padding:5px 8px;margin-top:2px;">
+              <option value="15">15 &mdash; fast</option>
+              <option value="20" selected>20 &mdash; balanced</option>
+              <option value="30">30 &mdash; best quality</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:.72rem;color:var(--muted);">
+          &#9432; Download additional video models in the <a href="#" onclick="switchView('models');return false;" style="color:var(--accent);">Models tab</a>. First gen with a new model downloads it automatically (~5&ndash;10&nbsp;min).
+        </div>
         <div style="display:flex;gap:8px;margin-top:8px;">
           <button class="btn-sm primary" onclick="nsfwVideo()">&#127916; Generate video</button>
         </div>
@@ -118,23 +233,42 @@ async function _renderNsfwSub() {
       <div class="card" style="margin-bottom:14px;">
         <label style="font-size:.78rem;">Prompt</label>
         <textarea id="nsfw-aprompt" rows="2" placeholder="Describe the music / audio&hellip;" style="width:100%;"></textarea>
-        <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
-          <select id="nsfw-aengine" style="padding:5px 8px;"><option value="musicgen">MusicGen</option><option value="acestep">ACE-Step (vocals)</option><option value="stable_audio">Stable Audio</option><option value="mms_tts">Voice (TTS)</option></select>
-          <input id="nsfw-adur" type="number" value="12" min="3" max="240" style="width:70px;padding:5px;" title="seconds">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:8px;">
+          <div>
+            <label style="font-size:.78rem;">&#127925; Engine</label><br>
+            <select id="nsfw-aengine" onchange="_nsfwAudEngineChange()" style="width:100%;padding:5px 8px;margin-top:2px;">${_nsfwAudioEngineOptionsHtml()}</select>
+          </div>
+          <div id="nsfw-adur-wrap">
+            <label style="font-size:.78rem;">Duration</label><br>
+            <select id="nsfw-adur" style="width:100%;padding:5px 8px;margin-top:2px;"></select>
+          </div>
+        </div>
+        <div id="nsfw-alyrics-wrap" style="display:none;margin-top:8px;">
+          <label style="font-size:.78rem;">&#127908; Lyrics <span style="color:var(--muted);">(ACE-Step only, optional &mdash; leave empty for instrumental)</span></label>
+          <textarea id="nsfw-alyrics" rows="3" placeholder="[verse]&hellip;" style="width:100%;"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
           <button class="btn-sm primary" onclick="nsfwAudio()">&#127925; Generate audio</button>
         </div>
-        <textarea id="nsfw-alyrics" rows="2" placeholder="Lyrics (ACE-Step only, optional)&hellip;" style="width:100%;margin-top:6px;"></textarea>
       </div>`,
     '3d': `
       <div class="card" style="margin-bottom:14px;">
         <label style="font-size:.78rem;">Prompt (single object &rarr; image &rarr; mesh)</label>
         <textarea id="nsfw-3prompt" rows="2" placeholder="Describe the 3D figure (adults only)&hellip;" style="width:100%;"></textarea>
+        <div style="margin-top:8px;">
+          <label style="font-size:.78rem;">&#129513; Generator model</label><br>
+          <select id="nsfw-3dgen" style="padding:5px 8px;margin-top:2px;">${_nsfwGenModelOptionsHtml()}</select>
+        </div>
+        <div style="margin-top:8px;font-size:.72rem;color:var(--muted);">
+          &#9432; Install more image&rarr;3D generator models in the <a href="#" onclick="switchView('models3d');return false;" style="color:var(--accent);">3D Studio tab</a>.
+        </div>
         <div style="display:flex;gap:8px;margin-top:8px;">
           <button class="btn-sm primary" onclick="nsfw3d()">&#129513; Generate 3D</button>
         </div>
       </div>`,
   };
   root.innerHTML = (forms[_nsfwSub] || '') + `<div id="nsfw-gallery">${_nsfwGalleryHtml(lib)}</div>`;
+  if (_nsfwSub === 'audio') _nsfwAudEngineChange();
   // keep the gallery live while anything is still cooking
   const active = (lib.generating || []).some(g => ['queued', 'generating'].includes(g.status))
     || (lib.videos || []).some(v => ['queued', 'generating'].includes(v.status))
@@ -185,14 +319,21 @@ function _nsfwGalleryHtml(lib) {
         <option value="__none" ${_nsfwCatFilter === '__none' ? 'selected' : ''}>Uncategorized</option>
       </select></div>`;
     const match = (cat) => !_nsfwCatFilter || (_nsfwCatFilter === '__none' ? !cat : cat === _nsfwCatFilter);
-    const cooking = (lib.generating || []).filter(g => match(g.nsfw_category)).map(g => `<div class="card">
-        <div style="font-size:.72rem;color:${g.status === 'failed' ? '#fca5a5' : '#a855f7'};">${g.status === 'failed' ? '&#10060; failed' : '&#9203; ' + esc(g.status)}</div>
-        <div style="font-size:.8rem;margin-top:4px;">${esc((g.prompt || '').slice(0, 120))}</div></div>`).join('');
+    const cooking = (lib.generating || []).filter(g => match(g.nsfw_category)).map(g => {
+      const failed = g.status === 'failed';
+      return `<div class="card">
+        <div style="font-size:.72rem;color:${failed ? '#fca5a5' : '#a855f7'};">${failed ? '&#10060; failed' : '&#9203; ' + esc(g.status)}</div>
+        <div style="font-size:.8rem;margin-top:4px;">${esc((g.prompt || '').slice(0, 120))}</div>
+        ${failed ? `<div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="btn-sm" onclick="nsfwRetry(${g.id})" title="Re-run this generation with the same prompt, model & settings">&#128260; Regenerate</button>
+          <button class="btn-sm danger" onclick="nsfwDelete('generations', ${g.id})">&#128465; Delete</button>
+        </div>` : ''}</div>`;
+    }).join('');
     const done = (lib.images || []).filter(d => match(d.nsfw_category)).map(d => {
       const url = _nsfwImgUrl(d.image_path);
       const chip = d.nsfw_category ? `<span style="font-size:.62rem;padding:1px 6px;border-radius:6px;background:rgba(168,85,247,.18);color:#c4a5f7;">${esc(d.nsfw_category)}</span>` : '';
       return `<div class="card">
-        ${url ? `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" loading="lazy" style="width:100%;border-radius:8px;"></a>` : ''}
+        ${url ? `<a href="${url}" target="_blank" rel="noopener"><img src="${thumbUrl(d.image_path)}" loading="lazy" decoding="async" style="width:100%;border-radius:8px;" onerror="this.onerror=null;this.src='${url}'"></a>` : ''}
         <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">${chip}</div>
         <div style="font-size:.78rem;margin-top:4px;color:var(--muted);" title="${esc(d.prompt || '')}">${esc((d.prompt || '').slice(0, 90))}</div>
         <div style="display:flex;gap:6px;margin-top:6px;">
@@ -242,13 +383,43 @@ function _nsfwGalleryHtml(lib) {
 async function nsfwGenerate() {
   const prompt = document.getElementById('nsfw-prompt')?.value.trim();
   if (!prompt) { toast('Type a prompt first', 'warn'); return; }
+  const model = document.getElementById('nsfw-model')?.value || '';
+  const variations = parseInt(document.getElementById('nsfw-variations')?.value || '3', 10);
+  const steps = parseInt(document.getElementById('nsfw-steps')?.value || '20', 10);
   try {
-    await api('/api/nsfw/generate', { method: 'POST', body: JSON.stringify({ prompt }) });
-    toast('Queued (private)');
+    await api('/api/nsfw/generate', { method: 'POST', body: JSON.stringify({ prompt, model: model || null, variations, steps }) });
+    toast(`Queued ${variations} variation${variations > 1 ? 's' : ''} (private)`);
     _renderNsfwSub();
   } catch (e) { toast(e.message, 'error'); }
 }
 window.nsfwGenerate = nsfwGenerate;
+
+// mirrors tab-audio.js's _audEngineChange: rebuilds the duration options for the
+// selected engine and shows/hides the lyrics box (ACE-Step only).
+function _nsfwAudEngineChange() {
+  const key = document.getElementById('nsfw-aengine')?.value;
+  const e = _nsfwAudioEngines.find(x => x.key === key);
+  const isVoice = e && e.kind === 'voice';
+  const durWrap = document.getElementById('nsfw-adur-wrap');
+  const durSel = document.getElementById('nsfw-adur');
+  const lyrWrap = document.getElementById('nsfw-alyrics-wrap');
+  if (lyrWrap) lyrWrap.style.display = (key === 'acestep') ? 'block' : 'none';
+  if (durWrap) durWrap.style.display = isVoice ? 'none' : '';
+  if (durSel && !isVoice) {
+    const d = _NSFW_AUD_DURATIONS[key] || _NSFW_AUD_DURATIONS.musicgen;
+    durSel.innerHTML = d.opts.map(s => `<option value="${s}"${s === d.rec ? ' selected' : ''}>${_nsfwFmtSecs(s)}</option>`).join('');
+  }
+}
+window._nsfwAudEngineChange = _nsfwAudEngineChange;
+
+async function nsfwModelChange(v) {
+  _nsfwImageModel = v || '';
+  try {
+    await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ nsfw_image_model: _nsfwImageModel }) });
+    toast('Image model saved');
+  } catch (e) { toast(e.message, 'error'); }
+}
+window.nsfwModelChange = nsfwModelChange;
 
 const _nsfwEnhBusy = (on) => { const b = document.getElementById('nsfw-enhance-btn'); if (b) { b.disabled = on; b.innerHTML = on ? '⏳ Enhancing…' : '✨ Enhance'; } };
 async function nsfwEnhance() {
@@ -263,8 +434,13 @@ window.nsfwEnhance = nsfwEnhance;
 async function nsfwVideo() {
   const prompt = document.getElementById('nsfw-vprompt')?.value.trim();
   if (!prompt) { toast('Type a prompt first', 'warn'); return; }
+  const model_id = document.getElementById('nsfw-vmodel')?.value || 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers';
+  const res = document.getElementById('nsfw-vres')?.value || '832x480';
+  const [width, height] = res.split('x').map(Number);
+  const num_frames = parseInt(document.getElementById('nsfw-vframes')?.value || '49', 10);
+  const steps = parseInt(document.getElementById('nsfw-vsteps')?.value || '20', 10);
   try {
-    await api('/api/nsfw/video', { method: 'POST', body: JSON.stringify({ prompt }) });
+    await api('/api/nsfw/video', { method: 'POST', body: JSON.stringify({ prompt, model_id, width, height, num_frames, steps }) });
     toast('Video queued (private)');
     _renderNsfwSub();
   } catch (e) { toast(e.message, 'error'); }
@@ -274,11 +450,13 @@ window.nsfwVideo = nsfwVideo;
 async function nsfwAudio() {
   const prompt = document.getElementById('nsfw-aprompt')?.value.trim();
   if (!prompt) { toast('Type a prompt first', 'warn'); return; }
+  const engine = document.getElementById('nsfw-aengine')?.value || 'musicgen';
   const body = {
     prompt,
-    engine: document.getElementById('nsfw-aengine')?.value || 'musicgen',
+    engine,
     duration: parseInt(document.getElementById('nsfw-adur')?.value || '12', 10),
-    lyrics: document.getElementById('nsfw-alyrics')?.value || '',
+    model_id: '',
+    lyrics: (engine === 'acestep') ? (document.getElementById('nsfw-alyrics')?.value || '') : '',
   };
   try {
     await api('/api/nsfw/audio', { method: 'POST', body: JSON.stringify(body) });
@@ -291,8 +469,9 @@ window.nsfwAudio = nsfwAudio;
 async function nsfw3d() {
   const prompt = document.getElementById('nsfw-3prompt')?.value.trim();
   if (!prompt) { toast('Type a prompt first', 'warn'); return; }
+  const generator = document.getElementById('nsfw-3dgen')?.value || 'triposr';
   try {
-    await api('/api/nsfw/3d', { method: 'POST', body: JSON.stringify({ prompt }) });
+    await api('/api/nsfw/3d', { method: 'POST', body: JSON.stringify({ prompt, generator }) });
     toast('3D generation queued (private)');
     _renderNsfwSub();
   } catch (e) { toast(e.message, 'error'); }
@@ -378,7 +557,8 @@ window.nsfwReject = nsfwReject;
 async function nsfwDelete(kind, id) {
   if (!confirm('Delete this item permanently?')) return;
   const route = { designs: `/api/designs/${id}`, videos: `/api/videos/${id}`,
-                  audio: `/api/audio/${id}`, models3d: `/api/models3d/${id}` }[kind];
+                  audio: `/api/audio/${id}`, models3d: `/api/models3d/${id}`,
+                  generations: `/api/generations/${id}` }[kind];
   try {
     await api(route, { method: 'DELETE' });
     toast('Deleted');
@@ -386,3 +566,12 @@ async function nsfwDelete(kind, id) {
   } catch (e) { toast(e.message, 'error'); }
 }
 window.nsfwDelete = nsfwDelete;
+
+async function nsfwRetry(id) {
+  try {
+    await api(`/api/generations/${id}/retry`, { method: 'POST' });
+    toast('Regenerating…');
+    _renderNsfwSub();
+  } catch (e) { toast(e.message, 'error'); }
+}
+window.nsfwRetry = nsfwRetry;

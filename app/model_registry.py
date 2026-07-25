@@ -27,6 +27,11 @@ REGISTRY = [
      "desc": "Multimodal model that looks at generated pixel-art sprites and scores "
              "them (The Company). A resident vision model is preferred; this is the "
              "load-if-needed pick."},
+    {"key": "doc_extract_model", "name": "Vision — document extract", "kind": "vision",
+     "default": "", "fallback": "world_vision_model",
+     "desc": "Multimodal model used by the reusable photo->fields extractor (📷 Snap "
+             "a receipt in Purchases, and future bill/paycheck capture). Blank = "
+             "share the sprite-reviewer vision slot above."},
     {"key": "security_model", "name": "Security analyst", "kind": "llm",
      "default": "", "fallback": "enhance_model",
      "desc": "Model the security AI hunt and the world SOC review use to analyse "

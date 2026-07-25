@@ -46,6 +46,59 @@ function bindCards() {
       } catch(e) { toast('Error: ' + e.message, 'error'); btn.disabled = false; }
     }
 
+    // ── Proposal review gate (proposal_gate.py) ─────────────────────────────
+    if (action === 'review-proposal') {
+      btn.disabled = true; btn.innerHTML = '⏳ Rating…';
+      try {
+        const r = await api(`/api/proposals/${id}/review`, { method: 'POST' });
+        const res = await pollTask(r.task_id, 150);   // judge can queue behind other LLM work
+        if (res && res.error) throw new Error(res.error);
+        toast(`⚖ Scored ${res.score} — ${res.verdict}${res.action === 'auto_rejected' ? ' (weeded out)' : ''}`);
+        renderProposals();
+      } catch(e) {
+        toast('Review failed: ' + e.message, 'error');
+        btn.disabled = false; btn.innerHTML = '⚖ Rate';
+      }
+    }
+
+    if (action === 'review-all-proposals') {
+      btn.disabled = true;
+      const orig = btn.innerHTML;
+      btn.innerHTML = '⏳ Reviewing…';
+      try {
+        const r = await api('/api/proposals/review-all', { method: 'POST' });
+        if (!r.task_id) { toast('Nothing to review — all pending proposals are already scored'); btn.disabled = false; btn.innerHTML = orig; return; }
+        if (r.already_running) toast('A review batch is already running — attaching to it', 'warn');
+        else toast(`⚖ Judging ${r.queued} proposal(s) in the background…`);
+        // Long poll: scores commit per-proposal, so re-render periodically to
+        // show them landing. Only re-render while the Proposals subtab is open.
+        for (let i = 0; i < 2400; i++) {
+          await new Promise(res => setTimeout(res, 3000));
+          let t; try { t = await api(`/api/task/${r.task_id}`); } catch { continue; }
+          if (t.status === 'done') {
+            const s = t.result || {};
+            toast(`✓ Review done — ${s.reviewed||0} scored, ${s.auto_rejected||0} weeded, ${s.auto_approved||0} auto-approved, ${s.held||0} for you`);
+            if (typeof _etsySubTab === 'undefined' || _etsySubTab === 'proposals') renderProposals();
+            loadStats();
+            return;
+          }
+          if (t.status === 'error') throw new Error(t.error || 'Batch review failed');
+          if (i > 0 && i % 5 === 0 && (typeof _etsySubTab === 'undefined' || _etsySubTab === 'proposals')
+              && document.getElementById('review-all-btn')) renderProposals();
+        }
+        throw new Error('Timed out waiting for the batch');
+      } catch(e) {
+        toast('Review-all failed: ' + e.message, 'error');
+        const b = document.getElementById('review-all-btn');
+        if (b) { b.disabled = false; b.innerHTML = orig; }
+      }
+    }
+
+    if (action === 'toggle-weeded') {
+      _showWeeded = !_showWeeded;
+      renderProposals();
+    }
+
     if (action === 'approve-design') {
       // DIRECT ONE-CLICK APPROVE — no modal
       btn.disabled = true;

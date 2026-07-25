@@ -59,10 +59,14 @@ async function worldLog(id) {
   try {
     const r = await api(`/api/world/agent/${id}/log`);
     if (typeof _consoleActive !== 'undefined') { _consoleActive = null; _consoleStrip?.(); }  // journal isn't a console tab
-    document.getElementById('world-modal-title').textContent = `📔 ${r.name}'s Journal`;
-    const el = document.getElementById('world-modal-body');
-    el.style.whiteSpace = 'pre-wrap'; el.textContent = r.markdown;
-    document.getElementById('world-modal').style.display = 'flex';
+    // Resolve the host dynamically (world-economy.js) instead of hardcoding the
+    // game modal's #world-modal-* ids — from the standalone Command tab those
+    // never exist, and this used to just throw. Command wins when present.
+    const h = _consoleHost();
+    if (!h.title || !h.body) return;
+    h.title.textContent = `📔 ${r.name}'s Journal`;
+    h.body.style.whiteSpace = 'pre-wrap'; h.body.textContent = r.markdown;
+    if (h.modal) h.modal.style.display = 'flex';
   } catch (e) { toast?.(e.message); }
 }
 function worldCloseModal() {
@@ -200,7 +204,6 @@ async function worldSettings() {
       ${chk('world_allow_free', 'Allow free items')}
       ${num('world_min_price_cents', 'Store price floor', '¢')}
       ${num('world_max_discount_pct', 'Max discount', '%')}
-      ${chk('world_require_review', 'Require review before posting (no AI-junk dumps)')}
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🪼 JellyCoin</div>
       ${chk('world_crypto_mining_enabled', 'Skilling boosts GPU mining (pays only in real mined blocks)')}
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🎵 Music</div>
@@ -614,7 +617,7 @@ async function worldSaveSettings() {
     'world_meetings_enabled', 'world_meeting_interval_min', 'world_incidents_enabled',
     'world_vision_enabled', 'world_vision_candidates', 'world_vision_retries', 'world_vision_min_score',
     'world_min_item_cost', 'world_allow_free', 'world_min_price_cents', 'world_max_discount_pct',
-    'world_require_review', 'world_prop_model', 'world_prop_lora', 'world_crypto_mining_enabled',
+    'world_prop_model', 'world_prop_lora', 'world_crypto_mining_enabled',
     'world_music_lyrics', 'world_leader_upgrades', 'world_leader_upgrade_hours',
     'world_tileset_auto', 'world_tileset_auto_min',
     'world_sprites_enabled', 'world_sprites_max_hour', 'world_sprites_auto', 'world_sprites_auto_min',

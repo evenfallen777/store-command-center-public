@@ -52,8 +52,14 @@ SYSTEMS = [
     {"id": "cognition",   "label": "Crew thinking (LLM)",    "group": "World",   "key": "world_llm_enabled",          "on": "1",   "off": "0", "desc": "Agents form thoughts, opinions, ideas."},
     {"id": "meetings",    "label": "Town meetings",          "group": "World",   "key": "world_meetings_enabled",     "on": "1",   "off": "0", "desc": "Periodic votes on company direction."},
     {"id": "incidents",   "label": "Incidents & events",     "group": "World",   "key": "world_incidents_enabled",    "on": "1",   "off": "0", "desc": "Random world events keep it lively."},
-    {"id": "auto_publish", "label": "Auto-publish (free only)", "group": "Company", "key": "world_ops_automation_mode", "on": "budget", "off": "review", "literal": True, "desc": "Free publishes (WordPress, Cults3D) run on their own. Paid listings, payouts and code ALWAYS wait for your blessing."},
+    # NOTE: "auto_publish" (world_ops_automation_mode) was removed 2026-07-21 — it was a
+    # pure mirror of the God Console's mode control (/api/world/ops/config), writing the
+    # exact same native key with the exact same "budget"/"review" values. No unique
+    # functionality was lost; set the mode from the God Console instead.
     {"id": "sell",        "label": "Autonomous listing",     "group": "Company", "key": "world_sell_auto",            "on": "1",   "off": "0", "desc": "Queue paid Etsy/Printify listings for your review (costs $0.20/ea)."},
+    {"id": "proposal_desk", "label": "Proposal desk (lanes + feeds)", "group": "Company", "key": "proposal_desk_enabled", "on": "1", "off": "0", "desc": "News/Reddit/Google feeds, the crew's suggestions and the Etsy demand signal become lane-tagged product proposals."},
+    {"id": "proposal_gate", "label": "Proposal review gate", "group": "Company", "key": "proposal_gate_enabled",      "on": "1",   "off": "0", "desc": "LLM judge scores + weeds pending proposals (vs live Etsy demand) before any GPU generation."},
+    {"id": "mail_gate",   "label": "Mail auto-reply gate",   "group": "Company", "key": "mail_gate_enabled",          "on": "1",   "off": "0", "desc": "The mail desk triages new email, drafts profile-driven replies, and (full_auto, hard-guardrailed) sends routine ones. Quotes/pricing always wait for you."},
     {"id": "swarm_cron",  "label": "Dev-swarm cron",         "group": "Dev",     "key": "swarm_cron_enabled",         "on": "1",   "off": "0", "desc": "Advance cron-enabled coding jobs on schedule."},
     {"id": "sec_monitor", "label": "Security monitor",       "group": "Infra",   "key": "security_monitor_enabled",   "on": "1",   "off": "0", "desc": "Watch the network for device changes."},
     {"id": "sec_scan",    "label": "Security auto-scan",     "group": "Infra",   "key": "security_autoscan_enabled",  "on": "1",   "off": "0", "desc": "Periodic Pi-hole / config scans."},

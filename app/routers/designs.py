@@ -145,6 +145,28 @@ def list_designs(status: str = "review", source: Optional[str] = None):
     conn.close()
     return result
 
+@router.get("/api/designs/{design_id}/export")
+def export_design(design_id: int, spec: str = "etsy"):
+    """Serve a publish-ready size variant of a design as a download.
+    spec='etsy' → 1024²/≤5MB JPEG; 'web' → 1600px medium. Re-derives from the current
+    master (correct even after pending→approved moves) and caches to designs/sizes/."""
+    import image_sizes
+    conn = get_conn()
+    row = conn.execute("SELECT image_path FROM designs WHERE id=?", (design_id,)).fetchone()
+    conn.close()
+    if not row or not row["image_path"]:
+        raise HTTPException(404, "design not found")
+    try:
+        out = image_sizes.one(row["image_path"], spec)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not out:
+        raise HTTPException(404, "source image missing")
+    fname = f"design_{design_id}_{spec}.{image_sizes.SPECS[spec]['ext']}"
+    return FileResponse(str(out), media_type="image/jpeg",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 class ApproveDesignRequest(BaseModel):
     product_types: list = ["T-Shirt"]
 

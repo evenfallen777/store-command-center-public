@@ -221,6 +221,117 @@ def create_media_tables(conn):
     """)
 
 
+def create_studio_tables(conn):
+    """AI Video Studio ("Director"): storyboard → scenes → shots → mixed video.
+
+    See docs/VIDEO-STUDIO-DESIGN.md. A project is one dropped idea; its ordered
+    scenes each render (Phase 2) as ONE video_chains row whose prompts are the
+    scene's shots; audio cues each become one audio_clips row. Phase 1 uses only
+    the storyboard columns (idea/logline/script/captions/audio_plan + the
+    scene/shot/cue text) — the render/artifact columns are claimed now so later
+    phases need no new migrations."""
+    conn.cursor().executescript("""
+    -- ── AI Video Studio ("Director"): storyboard → scenes → shots → mixed video ──
+    CREATE TABLE IF NOT EXISTS studio_projects (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        title            TEXT,
+        idea             TEXT NOT NULL,          -- the raw dropped idea/prompt/meme text
+        kind             TEXT DEFAULT 'short',   -- short (1 scene) | long (many scenes)
+        style            TEXT,                   -- optional style/mood steering
+        status           TEXT DEFAULT 'new',     -- new | storyboarding | draft | rendering
+                                                 -- | assembling | mixing | done | failed
+        -- render settings, decided once, copied to every scene chain (consistency)
+        model_id         TEXT DEFAULT 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
+        width            INTEGER DEFAULT 480,    -- portrait default: shorts/TikTok
+        height           INTEGER DEFAULT 832,
+        fps              INTEGER DEFAULT 16,
+        steps            INTEGER DEFAULT 20,
+        strength         REAL    DEFAULT 0.7,    -- V2V continuation strength
+        target_seconds   INTEGER DEFAULT 20,     -- what the storyboarder aims for
+        -- storyboard-level text (all owner-editable before render)
+        logline          TEXT,                   -- one-line summary from the LLM
+        script           TEXT,                   -- full voiceover script (concatenated scene VO)
+        captions         TEXT,                   -- social caption + hashtags (for export)
+        audio_plan       TEXT,                   -- JSON: {"music":{...},"voice":{...},"notes":...}
+        music_engine     TEXT DEFAULT 'musicgen',-- musicgen|musicgen_med|stable_audio|acestep
+        voice_engine     TEXT DEFAULT 'mms_tts',
+        -- artifacts
+        video_path       TEXT,                   -- assembled silent video (all scenes stitched)
+        mix_path         TEXT,                   -- the mixed master audio wav (debuggable alone)
+        final_path       TEXT,                   -- video + mixed audio, the exportable mp4
+        social_post_id   INTEGER,               -- set on export (fk → social_posts.id)
+        storyboard_task  INTEGER,               -- orchestrator task id of the running LLM job
+        progress_msg     TEXT,
+        error            TEXT,
+        nsfw             INTEGER DEFAULT 0,      -- Private-Studio project (gated everywhere)
+        created_at       TEXT DEFAULT (datetime('now')),
+        updated_at       TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS studio_scenes (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id    INTEGER NOT NULL,
+        idx           INTEGER NOT NULL,          -- 0-based scene order
+        title         TEXT,
+        summary       TEXT,                      -- what happens in this scene (editable)
+        voiceover     TEXT,                      -- the words TTS speaks over this scene (editable)
+        caption       TEXT,                      -- on-screen caption text for this scene (editable)
+        status        TEXT DEFAULT 'draft',      -- draft | queued | rendering | done | failed
+        chain_id      INTEGER,                   -- fk → video_chains.id once render starts
+        scene_path    TEXT,                      -- compiled scene clip (copy of chain compiled_path)
+        duration_s    REAL,                      -- MEASURED (ffprobe) after render; NULL before
+        est_seconds   REAL,                      -- planned duration (sum of shot seconds)
+        error         TEXT,
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS studio_shots (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        scene_id      INTEGER NOT NULL,
+        idx           INTEGER NOT NULL,          -- 0-based shot order within the scene
+        video_prompt  TEXT NOT NULL,             -- the T2V/V2V prompt (editable)
+        seconds       REAL DEFAULT 3.0,          -- requested length; snapped to num_frames
+        num_frames    INTEGER DEFAULT 49,        -- derived: snap(seconds*fps) ∈ {25,49,81,121}
+        caption       TEXT,                      -- optional per-shot caption override
+        seed          INTEGER DEFAULT 0,         -- 0 = random; set for reproducible rerolls
+        video_id      INTEGER,                   -- fk → videos.id (the rendered chain segment)
+        status        TEXT DEFAULT 'draft',      -- draft | rendering | done | failed
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY(scene_id) REFERENCES studio_scenes(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS studio_cues (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id    INTEGER NOT NULL,
+        scene_id      INTEGER,                   -- voiceover/sfx cues anchor to a scene; music = NULL
+        kind          TEXT NOT NULL,             -- voiceover | music | sfx
+        text          TEXT NOT NULL,             -- VO: words to speak · music/sfx: generation prompt
+        engine        TEXT,                      -- NULL = project default for the kind
+        start_s       REAL DEFAULT 0,            -- timeline offset in the FINAL video (computed
+                                                 -- for VO from measured scene starts; sfx =
+                                                 -- scene start + offset_s; music = 0)
+        offset_s      REAL DEFAULT 0,            -- sfx: offset within its scene (editable)
+        duration_s    REAL,                      -- requested (music/sfx); measured for VO after gen
+        gain          REAL DEFAULT 1.0,          -- mix volume (music default 0.25 set at plan time)
+        clip_id       INTEGER,                   -- fk → audio_clips.id once generated
+        status        TEXT DEFAULT 'draft',      -- draft | queued | generating | done | failed
+        error         TEXT,
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id),
+        FOREIGN KEY(scene_id)   REFERENCES studio_scenes(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_studio_scenes_project ON studio_scenes(project_id, idx);
+    CREATE INDEX IF NOT EXISTS idx_studio_shots_scene    ON studio_shots(scene_id, idx);
+    CREATE INDEX IF NOT EXISTS idx_studio_cues_project   ON studio_cues(project_id, kind);
+    """)
+    conn.commit()
+
+
 def create_resell_tables(conn):
     conn.cursor().executescript("""
     CREATE TABLE IF NOT EXISTS resell_listings (
@@ -385,6 +496,25 @@ def create_social_tables(conn):
         created_at   TEXT DEFAULT (datetime('now')),
         updated_at   TEXT DEFAULT (datetime('now'))
     );
+
+    -- Phase-1 auto-publishing: one row per (post, platform) upload attempt/result.
+    -- The post stays the source of truth for content; this tracks what actually
+    -- went live where (YouTube first — app/social_publish/youtube.py).
+    CREATE TABLE IF NOT EXISTS social_publications (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id          INTEGER NOT NULL,       -- fk → social_posts.id
+        platform         TEXT NOT NULL,          -- youtube | instagram | tiktok | facebook
+        status           TEXT DEFAULT 'pending', -- pending|uploading|processing|live|failed
+        platform_post_id TEXT,                   -- e.g. the YouTube videoId
+        platform_url     TEXT,                   -- e.g. https://youtu.be/<id>
+        upload_state     TEXT,                   -- json: resumable session (resume after crash)
+        error            TEXT,
+        attempts         INTEGER DEFAULT 0,
+        created_at       TEXT DEFAULT (datetime('now')),
+        updated_at       TEXT DEFAULT (datetime('now')),
+        UNIQUE(post_id, platform),
+        FOREIGN KEY(post_id) REFERENCES social_posts(id)
+    );
     """)
 
 
@@ -442,7 +572,82 @@ def create_swarm_tables(conn):
         created_at  TEXT DEFAULT (datetime('now')),
         answered_at TEXT
     );
+
+    -- Owner directives injected into a RUNNING job (POST /api/github/jobs/{id}/direct).
+    -- The engine reads unconsumed rows at the next stage boundary, appends them to
+    -- that turn's prompt as "OWNER DIRECTIVE (incorporate this)", marks consumed.
+    CREATE TABLE IF NOT EXISTS swarm_directives (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id      INTEGER NOT NULL,
+        text        TEXT NOT NULL,
+        consumed    INTEGER DEFAULT 0,
+        created_at  TEXT DEFAULT (datetime('now'))
+    );
     """)
+
+
+def create_dev_projects_tables(conn):
+    """🐙 The Engineers — per-project registry for the dev swarm.
+
+    One row per software project the swarm can work: the store itself (the
+    always-present primary, kind='store'), registered external repos, and
+    brand-new projects the Engineers start (kind='engineer'). The policy every
+    row enforces identically: the swarm auto-builds on the WORK branch with no
+    human step, but a human approval (the existing /approve → /promote gate)
+    is always required before code lands on the LIVE branch. `work_branch`
+    only selects WHERE the swarm edits — never whether the gate applies."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS dev_projects (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind          TEXT NOT NULL DEFAULT 'external',  -- 'store' | 'external' | 'engineer'
+        name          TEXT NOT NULL,
+        repo          TEXT,                    -- owner/name (github full), NULL for pure-local
+        local_path    TEXT,                    -- checkout/worktree path on disk (live branch worktree)
+        dev_path      TEXT,                    -- optional separate dev worktree path (store uses REPO_DEV)
+        live_branch   TEXT DEFAULT 'main',     -- branch that is "live" (master for store)
+        work_branch   TEXT DEFAULT 'dev',      -- toggle: 'dev' (staged) | 'main' (edit live worktree directly)
+        is_primary    INTEGER DEFAULT 0,       -- 1 for the store (the main autonomous evolving project)
+        engineers_enabled INTEGER DEFAULT 0,   -- Engineers actively work this project
+        merge_gate    INTEGER DEFAULT 1,       -- require human approval before landing on live branch
+        autonomy      TEXT DEFAULT 'auto',     -- swarm autonomy for this project
+        review_mode   TEXT DEFAULT 'human',    -- who satisfies the review gate: human|swarm|either
+        auto_go_live  INTEGER DEFAULT 0,       -- after promote-to-main, auto-apply main→live store (store/primary only)
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    # idempotent ALTERs for DBs created before these columns existed
+    for mig in ("ALTER TABLE dev_projects ADD COLUMN review_mode TEXT DEFAULT 'human'",
+                "ALTER TABLE dev_projects ADD COLUMN auto_go_live INTEGER DEFAULT 0"):
+        try:
+            conn.execute(mig)
+        except Exception:
+            pass
+    conn.commit()
+    # Seed exactly one 'store' primary row on first init (idempotent: only when
+    # no store row exists yet). repo (owner/name) is derived from the master
+    # worktree's origin remote when cheap; NULL otherwise.
+    row = conn.execute("SELECT id FROM dev_projects WHERE kind='store' LIMIT 1").fetchone()
+    if not row:
+        master_path = dev_path = None
+        repo_full = None
+        try:
+            from config import REPO_MASTER, REPO_DEV, GIT_BIN
+            master_path, dev_path = REPO_MASTER, REPO_DEV
+            import re as _re, subprocess as _sp
+            r = _sp.run([GIT_BIN, "-C", REPO_MASTER, "remote", "get-url", "origin"],
+                        capture_output=True, text=True, timeout=5)
+            m = _re.search(r"github\.com[:/]([^/]+)/([^/.]+)", r.stdout or "")
+            if r.returncode == 0 and m:
+                repo_full = f"{m.group(1)}/{m.group(2)}"
+        except Exception:
+            pass
+        conn.execute(
+            "INSERT INTO dev_projects (kind,name,repo,local_path,dev_path,live_branch,"
+            "work_branch,is_primary,engineers_enabled,merge_gate,autonomy) "
+            "VALUES ('store','Store Command Center',?,?,?,'master','dev',1,0,1,'auto')",
+            (repo_full, master_path, dev_path))
+        conn.commit()
 
 
 def create_world_tables(conn):
@@ -617,6 +822,192 @@ def create_bills_tables(conn):
     conn.commit()
 
 
+def create_mail_tables(conn):
+    """📬 Mail & Quotes — config-driven mail desk (routers/mail.py + mail_engine.py +
+    mail_gate.py).
+
+    Four tables replace the old single-mailbox `mail_*` settings hardcode:
+
+      mail_profiles   editable BUSINESS PROFILES (name, what the business does, the
+                      non-negotiable reply/quote terms, a pricing-model JSON, tone,
+                      signature). The reply drafter prompt (registry key `mail_quote`)
+                      is a template these fields fill — NO business identity lives in
+                      code anymore.
+      mail_accounts   multiple mail accounts, each provider 'imap' (generic
+                      IMAP/SMTP: host/port/security/verify-cert) or 'gmail'
+                      (OAuth via IMAP/SMTP XOAUTH2). Credentials are Fernet-encrypted
+                      IN THE ROW (crypto.enc, same at-rest scheme as secret settings).
+                      Each account binds one business profile and opts in/out of the
+                      auto-reply gate.
+      mail_faq        the FAQ / Q&A knowledge base, per-profile (NULL = all profiles).
+                      Incoming mail is matched locally (word overlap) + confirmed by
+                      the classifier; a hit answers the mail from YOUR words.
+      mail_log        the gate's REVIEW TRAIL: one row per processed message —
+                      classification, matched FAQ, linked order context, the draft,
+                      and what the gate did (drafted|held|sent|skipped) with the
+                      reason. UNIQUE(account_id, uid) is the reprocess guard.
+
+    SEED (idempotent, owner-preserving): when the legacy single-mailbox settings
+    (mail_user + friends) exist and no accounts do, the old setup is migrated into
+    a default profile + account so the existing workflow keeps working. A fresh
+    install has no mail_user → seeds NOTHING → public forks start clean."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS mail_profiles (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,               -- business name (used in the From line + prompt)
+        business_type TEXT DEFAULT '',             -- short label: carpentry | store | ...
+        description   TEXT DEFAULT '',             -- what the business is/does (prompt context)
+        terms         TEXT DEFAULT '',             -- non-negotiable reply/quote rules (one per line)
+        pricing       TEXT DEFAULT '{}',           -- json: {hourly_rate,minimum_hours,materials_policy,tax_note,currency}
+        tone          TEXT DEFAULT 'warm, concise, professional',
+        signature     TEXT DEFAULT '',             -- how replies sign off
+        is_default    INTEGER DEFAULT 0,           -- used when an account has no profile bound
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS mail_accounts (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        label          TEXT NOT NULL,              -- display label in the UI
+        provider       TEXT DEFAULT 'imap',        -- imap | gmail
+        email          TEXT DEFAULT '',            -- the mailbox address
+        display_name   TEXT DEFAULT '',            -- From-header display name
+        username       TEXT DEFAULT '',            -- login (blank = email)
+        password_enc   TEXT DEFAULT '',            -- Fernet-encrypted (crypto.enc)
+        imap_host      TEXT DEFAULT '',
+        imap_port      INTEGER DEFAULT 993,
+        imap_security  TEXT DEFAULT 'ssl',         -- ssl | starttls | plain
+        smtp_host      TEXT DEFAULT '',
+        smtp_port      INTEGER DEFAULT 587,
+        smtp_security  TEXT DEFAULT 'starttls',    -- ssl | starttls | plain
+        verify_cert    INTEGER DEFAULT 1,          -- 0 = self-signed OK (e.g. local Mailcow)
+        gmail_access_token_enc  TEXT DEFAULT '',   -- gmail provider: OAuth tokens (encrypted)
+        gmail_refresh_token_enc TEXT DEFAULT '',
+        gmail_token_expires     INTEGER DEFAULT 0,
+        signature      TEXT DEFAULT '',            -- per-account signature override ('' = profile's)
+        profile_id     INTEGER,                    -- fk → mail_profiles.id (bound business profile)
+        enabled        INTEGER DEFAULT 1,
+        gate_enabled   INTEGER DEFAULT 1,          -- this account participates in the auto-reply gate
+        last_error     TEXT DEFAULT '',
+        created_at     TEXT DEFAULT (datetime('now')),
+        updated_at     TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS mail_faq (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id  INTEGER,                       -- NULL = applies to every profile
+        question    TEXT NOT NULL,
+        answer      TEXT NOT NULL,
+        enabled     INTEGER DEFAULT 1,
+        hits        INTEGER DEFAULT 0,             -- times this FAQ answered a mail
+        created_at  TEXT DEFAULT (datetime('now')),
+        updated_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS mail_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id  INTEGER NOT NULL,
+        uid         TEXT NOT NULL,                 -- IMAP UID within the account's INBOX
+        message_id  TEXT DEFAULT '',
+        from_email  TEXT DEFAULT '',
+        from_name   TEXT DEFAULT '',
+        subject     TEXT DEFAULT '',
+        intent      TEXT DEFAULT '',               -- quote_request|order_support|faq|spam|other
+        confidence  INTEGER,                       -- classifier confidence 0-100
+        routine     INTEGER DEFAULT 0,             -- 1 = reply commits no money/price/promise
+        faq_id      INTEGER,                       -- matched FAQ row
+        order_ref   TEXT DEFAULT '',               -- json: linked designs/orders/proposals context
+        draft       TEXT DEFAULT '',               -- the drafted reply body
+        status      TEXT DEFAULT 'new',            -- new|drafted|held|sent|skipped|dismissed|error
+        reason      TEXT DEFAULT '',               -- why held/skipped/errored
+        sent_at     TEXT,
+        created_at  TEXT DEFAULT (datetime('now')),
+        updated_at  TEXT DEFAULT (datetime('now')),
+        UNIQUE(account_id, uid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mail_log_status ON mail_log(status, id);
+    CREATE INDEX IF NOT EXISTS idx_mail_faq_profile ON mail_faq(profile_id, enabled);
+    """)
+    conn.commit()
+    seed_mail_defaults(conn)
+
+
+def seed_mail_defaults(conn):
+    """One-time migration of the legacy single-mailbox mail_* settings into the new
+    profile + account tables, so the owner's existing workflow keeps working with
+    zero re-setup. Fires ONLY when a legacy mailbox is actually configured
+    (mail_user set) and nothing has been seeded/created yet — a fresh clone seeds
+    nothing, so public installs start with a clean, unbranded mail desk. The legacy
+    settings rows are left in place (integrations status + back-compat read them)."""
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='mail_seeded_v1'").fetchone()
+        if row and row["value"] == "1":
+            return
+        have_accounts = conn.execute("SELECT COUNT(*) c FROM mail_accounts").fetchone()["c"]
+
+        def _s(key, default=""):
+            r = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return (r["value"] if r and r["value"] not in (None, "") else default)
+
+        mail_user = _s("mail_user")
+        if mail_user and not have_accounts:
+            # The owner's original carpentry terms — previously hardcoded in the
+            # mail_quote prompt, now DATA in their default profile (fully editable).
+            desc = ("a solo precision carpenter in your local area. "
+                    "Labor-only handyman/carpentry work; the customer supplies materials.")
+            terms = (
+                "- Labor only: $40/hour, 4-hour minimum. The clock starts when the job starts.\n"
+                "- NO fixed-price bids or contracts — only a simple labor agreement. Give an "
+                "HOURLY estimate as a RANGE of hours (e.g. 'roughly 6-10 hours'), never a fixed "
+                "total price promise.\n"
+                "- The customer buys/provides all materials from a list the carpenter gives them; the carpenter does not supply materials.\n"
+                "- No work, no charge. If unhappy, they can ask him to stop and pay only for hours worked.\n"
+                "- The carpenter does NOT do: full re-siding, sheetrock finishing (tape/bed/paint — he hangs it), "
+                "shingles (he dry-ins watertight), concrete beyond a fence post or two, custom "
+                "cabinets from scratch, or windows past a one-person (~5'6\") reach. If the request "
+                "is clearly outside this, say so kindly and suggest what he CAN do.")
+            pricing = ('{"hourly_rate": 40, "minimum_hours": 4, '
+                       '"materials_policy": "customer buys/provides all materials", '
+                       '"tax_note": "", "currency": "USD"}')
+            cur = conn.execute(
+                "INSERT INTO mail_profiles (name,business_type,description,terms,pricing,tone,"
+                "signature,is_default) VALUES (?,?,?,?,?,?,?,1)",
+                ("Acme Carpentry", "carpentry", desc, terms, pricing,
+                 "warm, concise, confident", "Wes — Acme Carpentry"))
+            carpentry_id = cur.lastrowid
+            # A second profile for the POD storefront's customer service, so buyer
+            # questions (Etsy/Printify) draft with store context instead of quotes.
+            store_name = _s("store_name", "The store")
+            conn.execute(
+                "INSERT INTO mail_profiles (name,business_type,description,terms,pricing,tone,signature) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"{store_name} customer service", "store",
+                 "print-on-demand storefront (Etsy via Printify) customer service — order "
+                 "status, shipping, sizing and product questions from buyers.",
+                 "- Never promise refunds, replacements or exact delivery dates — offer to "
+                 "look into it and follow up.\n"
+                 "- Production and shipping are handled by the print provider; typical "
+                 "production is a few business days.\n"
+                 "- Be helpful and specific when order context is provided; otherwise ask "
+                 "for the order number.",
+                 "{}", "friendly, helpful, professional", store_name))
+            # The Mailcow account itself (the encrypted mail_pass row is copied
+            # VERBATIM — it is already Fernet-encrypted at rest).
+            pass_enc = ""
+            r = conn.execute("SELECT value FROM settings WHERE key='mail_pass'").fetchone()
+            if r and r["value"]:
+                pass_enc = r["value"]
+            conn.execute(
+                "INSERT INTO mail_accounts (label,provider,email,display_name,username,password_enc,"
+                "imap_host,imap_port,imap_security,smtp_host,smtp_port,smtp_security,verify_cert,"
+                "profile_id,enabled,gate_enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1)",
+                ("Support mailbox", "imap", mail_user, "Acme Carpentry", mail_user, pass_enc,
+                 _s("mail_imap_host", "127.0.0.1"), int(_s("mail_imap_port", "993") or 993), "ssl",
+                 _s("mail_smtp_host", "127.0.0.1"), int(_s("mail_smtp_port", "587") or 587), "starttls",
+                 0, carpentry_id))
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('mail_seeded_v1','1')")
+        conn.commit()
+    except Exception:
+        pass   # seeding must never block init_db; it re-tries next boot (flag unset on failure)
+
+
 def run_migrations(conn):
     c = conn.cursor()
     # Migrations — add columns that might be missing in older DBs
@@ -653,6 +1044,9 @@ def run_migrations(conn):
         "ALTER TABLE models3d ADD COLUMN category TEXT",    # top-level folder name
         # 3D generation: live progress message so the UI isn't a black box
         "ALTER TABLE models3d ADD COLUMN progress_msg TEXT",
+        # 3D generation observability: which generator (triposr|triposg|sf3d|trellis)
+        # produced this row, so triage doesn't have to guess
+        "ALTER TABLE models3d ADD COLUMN generator TEXT",
         # Video→audio bridge: a muxed copy with music/voice + its own status
         "ALTER TABLE videos ADD COLUMN audio_path TEXT",
         "ALTER TABLE videos ADD COLUMN audio_status TEXT",
@@ -702,6 +1096,9 @@ def run_migrations(conn):
         "ALTER TABLE world_agents ADD COLUMN posted_until REAL DEFAULT 0",
         "ALTER TABLE world_agents ADD COLUMN posted_col INTEGER DEFAULT 0",
         "ALTER TABLE world_agents ADD COLUMN posted_row INTEGER DEFAULT 0",
+        # Oracle personas: the world body's display `name` is a persona (Delphi,
+        # Pythia, …) — model_id keeps the real LM Studio model id for the detail panel.
+        "ALTER TABLE world_agents ADD COLUMN model_id TEXT",
         # The Company world-builder's eyes: vision score + notes on each prop
         "ALTER TABLE world_props ADD COLUMN score INTEGER",
         "ALTER TABLE world_props ADD COLUMN verdict TEXT",
@@ -719,6 +1116,74 @@ def run_migrations(conn):
         "ALTER TABLE video_chains ADD COLUMN nsfw INTEGER DEFAULT 0",
         "ALTER TABLE audio_clips ADD COLUMN nsfw INTEGER DEFAULT 0",
         "ALTER TABLE models3d ADD COLUMN nsfw INTEGER DEFAULT 0",
+        # Income Phase 1: generalize `paychecks` into any-kind income, additively.
+        # Existing rows need no backfill — the defaults make them paycheck/manual.
+        # Phase 1 is manual entry ONLY: external_source is always 'manual' here;
+        # a later phase (PayPal/on-chain/Printify importers) will write real values.
+        "ALTER TABLE paychecks ADD COLUMN income_type TEXT DEFAULT 'paycheck'",  # paycheck|sale|refund|gift|dividend|interest|crypto_receive|payout|other
+        "ALTER TABLE paychecks ADD COLUMN currency TEXT DEFAULT 'USD'",
+        "ALTER TABLE paychecks ADD COLUMN amount_native REAL",       # coin/share amount when currency != USD; amount_cents stays USD-at-receipt
+        "ALTER TABLE paychecks ADD COLUMN external_source TEXT DEFAULT 'manual'",  # manual|paypal|square|printify|btc|…
+        "ALTER TABLE paychecks ADD COLUMN external_txn_id TEXT",     # NULL for manual entries
+        "ALTER TABLE paychecks ADD COLUMN voided INTEGER DEFAULT 0",
+        # Dedup guard for future importers: one row per (source, external id). Must
+        # run AFTER the two ALTERs above add their columns — see the ordered list.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_income_ext ON paychecks(external_source, external_txn_id) "
+        "WHERE external_txn_id IS NOT NULL",
+        # Social publishing Phase 0: link a post to its source video (single video OR
+        # compiled chain), carry a thumbnail + per-platform metadata overrides, and
+        # leave room for taste-scoring / prayer-linked automation later.
+        "ALTER TABLE social_posts ADD COLUMN video_id INTEGER",       # fk → videos.id
+        "ALTER TABLE social_posts ADD COLUMN chain_id INTEGER",       # fk → video_chains.id
+        "ALTER TABLE social_posts ADD COLUMN thumb_path TEXT",        # local thumbnail file
+        "ALTER TABLE social_posts ADD COLUMN per_platform TEXT",      # json: {youtube:{title,description,tags,privacy},…}
+        "ALTER TABLE social_posts ADD COLUMN taste REAL",             # taste score (auto-curation later)
+        "ALTER TABLE social_posts ADD COLUMN prayer_id INTEGER",      # optional prayer/automation linkage
+        # Social Phase 3a — real auto-scheduler (app/social_scheduler.py): the loop
+        # CLAIMS a due post by stamping auto_state before uploading anything, and a
+        # claimed post is never picked again → structurally cannot double-post.
+        # NULL=untouched | publishing | done | dry_run | failed:<why>
+        "ALTER TABLE social_posts ADD COLUMN auto_state TEXT",
+        # Social Phase 3b — post analytics → taste model: platform performance stats
+        # fetched after publish (YouTube videos.list statistics; TikTok best-effort)
+        "ALTER TABLE social_publications ADD COLUMN stats TEXT",      # json: {available,views,likes,comments,shares,…}
+        "ALTER TABLE social_publications ADD COLUMN stats_at TEXT",   # last analytics refresh (UTC)
+        # AI Video Studio ("Director"): trace chains/clips back to their studio objects
+        "ALTER TABLE video_chains ADD COLUMN studio_scene_id INTEGER",   # fk → studio_scenes.id
+        "ALTER TABLE audio_clips  ADD COLUMN studio_cue_id INTEGER",     # fk → studio_cues.id
+        # Director scenes need per-shot lengths inside one chain: JSON list of
+        # per-segment num_frames; NULL = uniform num_frames (fully backward-compatible)
+        "ALTER TABLE video_chains ADD COLUMN frames_json TEXT",
+        # Director Phase 2: the simple mix is ONE music bed + ONE whole-script
+        # voiceover clip per project (per-scene VO timeline = Phase 3), so the
+        # generated audio_clips ids live on the project row.
+        "ALTER TABLE studio_projects ADD COLUMN music_clip_id INTEGER",  # fk → audio_clips.id
+        "ALTER TABLE studio_projects ADD COLUMN vo_clip_id INTEGER",     # fk → audio_clips.id
+        # Director Phase 2: owner-uploaded footage used as a shot's source clip
+        # (Phase 2 supports uploads as the LEADING shots of a scene; the chain
+        # then V2V-continues from the last uploaded clip)
+        "ALTER TABLE studio_shots ADD COLUMN source_path TEXT",
+        # Chain layered audio (owner bug A): opt-in music/narration/SFX generated
+        # for a compiled video chain and muxed on (services_media_chain.
+        # render_chain_audio). Default OFF — plain chains behave exactly as before.
+        "ALTER TABLE video_chains ADD COLUMN audio_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE video_chains ADD COLUMN audio_settings TEXT",  # json: layers/volumes/engines/narration
+        "ALTER TABLE video_chains ADD COLUMN audio_status TEXT",    # NULL|queued|generating|done|failed
+        "ALTER TABLE video_chains ADD COLUMN audio_error TEXT",
+        "ALTER TABLE video_chains ADD COLUMN final_path TEXT",      # compiled video WITH the mixed audio
+        "ALTER TABLE audio_clips ADD COLUMN chain_id INTEGER",      # fk → video_chains.id (keeps chain layers out of the Audio gallery)
+        # Proposal review gate: an LLM judge rates each pending proposal so the
+        # good ones surface and the weeds get gated out (see proposal_gate.py).
+        # Existing rows keep NULLs = "not yet reviewed"; no backfill needed.
+        "ALTER TABLE proposals ADD COLUMN score INTEGER",        # 0-100 judge score
+        "ALTER TABLE proposals ADD COLUMN score_reason TEXT",    # judge's one-liner
+        "ALTER TABLE proposals ADD COLUMN verdict TEXT",         # reject | hold | approve
+        "ALTER TABLE proposals ADD COLUMN reviewed_at TEXT",     # UTC, when judged
+        # Proposal desk lanes: which themed generator originated the proposal
+        # (humor|news|tech|gaming|evergreen|market — trends.LANES; 'agent'
+        # suggestions get their lane from the suggesting agent's dept).
+        # Existing rows keep NULL = pre-lane era; nothing breaks.
+        "ALTER TABLE proposals ADD COLUMN lane TEXT",
     ]:
         try:
             c.execute(migration)
@@ -739,6 +1204,17 @@ def create_ledger_tables(conn):
     Called from routers/money/ledger.py at import (same one-time-ensure pattern as
     create_bills_tables), so db.py needs no wiring.
 
+    Income Phase 1 (generalizing `paychecks` into any-kind income, additively) put
+    its new columns (income_type/currency/amount_native/external_source/
+    external_txn_id/voided) directly on the CREATE TABLE below — not only on the
+    run_migrations() ALTERs — because this function's CREATE TABLE IF NOT EXISTS
+    runs on router import, which for a brand-new DB can happen BEFORE db.init_db()
+    (and its run_migrations() pass) ever runs (e.g. the test suite builds the DB
+    via db.init_db() before `import main` pulls routers/ledger.py in). The
+    run_migrations() ALTERs remain the path that backfills these columns onto an
+    EXISTING paychecks table from before this change; both are idempotent so
+    running both (fresh installs will) is harmless.
+
     NOT the game world's economy (world_ledger / world_ops_ledger) — unrelated."""
     conn.cursor().executescript("""
     CREATE TABLE IF NOT EXISTS paychecks (
@@ -752,7 +1228,14 @@ def create_ledger_tables(conn):
         cycle             TEXT DEFAULT 'irregular', -- weekly|biweekly|semimonthly|monthly|irregular
         notes             TEXT DEFAULT '',
         extra             TEXT DEFAULT '{}',    -- JSON object of arbitrary user-defined fields
-        created_at        TEXT DEFAULT (datetime('now'))
+        created_at        TEXT DEFAULT (datetime('now')),
+        -- ── Income Phase 1: generalized "paycheck" -> any-kind income ──────────
+        income_type       TEXT DEFAULT 'paycheck', -- paycheck|sale|refund|gift|dividend|interest|crypto_receive|payout|other
+        currency          TEXT DEFAULT 'USD',      -- display currency; amount_cents is always USD-at-receipt
+        amount_native     REAL,                    -- coin/share amount when currency != USD
+        external_source   TEXT DEFAULT 'manual',   -- manual|paypal|square|printify|btc|… (Phase 1 only ever writes 'manual')
+        external_txn_id   TEXT,                    -- NULL for manual entries; dedup key for future importers
+        voided            INTEGER DEFAULT 0        -- 1 = excluded from every summary/series total
     );
     CREATE TABLE IF NOT EXISTS purchases (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -768,8 +1251,37 @@ def create_ledger_tables(conn):
     CREATE INDEX IF NOT EXISTS idx_paychecks_received ON paychecks(received_at);
     CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(purchased_at);
     CREATE INDEX IF NOT EXISTS idx_purchases_category ON purchases(category, purchased_at);
+    -- ── Income Phase 2: per-source READ-ONLY importer state (app/income_import.py).
+    --    One row per source (paypal|printify|onchain). `running` is the
+    --    anti-double-run guard (same pattern as world_auto's persisted timers);
+    --    it is reset to 0 on every daemon start so a crash can never wedge a
+    --    source. Money rows land in `paychecks` and dedupe on the existing
+    --    idx_income_ext unique index (external_source, external_txn_id).
+    CREATE TABLE IF NOT EXISTS income_import_state (
+        source       TEXT PRIMARY KEY,       -- paypal | printify | onchain
+        running      INTEGER DEFAULT 0,      -- 1 while an import for this source is in flight
+        last_run_at  TEXT,                   -- when an import last finished (any outcome)
+        last_ok_at   TEXT,                   -- when it last finished without error
+        last_added   INTEGER DEFAULT 0,      -- rows inserted on the last run
+        last_seen    INTEGER DEFAULT 0,      -- candidate records the last run examined
+        last_error   TEXT DEFAULT '',        -- '' = last run was clean
+        cursor       TEXT DEFAULT ''         -- per-source resume marker (free-form)
+    );
     """)
     conn.commit()
+    # Best-effort here (own try/except, NOT part of the script above): on a fresh
+    # DB the columns just got created above, so this succeeds immediately. On an
+    # EXISTING pre-Income-Phase-1 DB the columns don't exist yet, this fails, and
+    # run_migrations() picks it up later (same ordered-list pattern, after its
+    # ALTERs add the columns) — see run_migrations() for why this can't be
+    # unconditional in the script above without risking that upgrade path.
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_income_ext ON paychecks(external_source, external_txn_id) "
+            "WHERE external_txn_id IS NOT NULL")
+        conn.commit()
+    except Exception:
+        pass
 
 
 def create_game_listing_tables(conn):

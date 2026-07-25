@@ -102,14 +102,20 @@ window.WM = (function () {
 
   const KIND_COLOR = { hq: '#8fb3ff', house: '#6b7ba0', shop: '#6aa6d6', leisure: '#f0b45a',
                        townhall: '#fde047', exec: '#fb7185', church: '#cdbff0', library: '#8fc7a9',
-                       research: '#818cf8',
+                       research: '#818cf8', school: '#6ec6e6', nsfw: '#e0567a',
                        // standalone dept buildings (like Research Lab — NOT HQ rooms)
                        mail: '#f9a8d4', homelab: '#7dd3fc', pearl: '#a7f3d0', assistant: '#d8b4fe' };
   // distinct roof colour per named venue/loc so no two building types look alike
   const LOC_COLOR = { bar: '#e0714a', arcade: '#a26cf0', tv: '#4aa0e0', cafe: '#d1a05a',
                       church: '#cdbff0', library: '#8fc7a9', townhall: '#fde047', exec: '#fb7185',
                       park: '#5bb46a', gas: '#e05a6a', lounge: '#c07ad0', research: '#818cf8',
+                      school: '#6ec6e6', nsfw: '#e0567a',
                       mail: '#f9a8d4', homelab: '#7dd3fc', pearl: '#a7f3d0', assistant: '#d8b4fe' };
+  // ── 😈 NSFW store gate: the building exists but is BOARDED UP + inert unless the
+  // EXISTING layered gate is on (world_satan_nsfw_domain AND nsfw.world_active(),
+  // ANDed server-side into /api/world/state's nsfw_store_open → window._wmNsfwOn).
+  // Nothing here can turn the gate on — this only READS it. Default off = boarded.
+  function _nsfwOn() { return window._wmNsfwOn === true; }
 
   // ── organic-map helpers ──
   const TAU = Math.PI * 2;
@@ -126,11 +132,15 @@ window.WM = (function () {
   }
   // scatter a building of w×h in a distance band from centre, on grass. Phase 0 prefers a
   // roadside spot; phase 1 accepts any clear grass (then carves a short access lane to a road).
-  function _tryPlace(w, h, minD, maxD, extra, rnd, pick, CX, CY) {
+  // `arc` = [startAngle, span] biases phase 0 into a DISTRICT sector (civic quarter, leisure
+  // strip, industrial row…) so the town reads as planned rather than a uniform scatter; the
+  // phase-1 fallback still searches the whole circle so nothing ever fails to place.
+  function _tryPlace(w, h, minD, maxD, extra, rnd, pick, CX, CY, arc) {
     for (let phase = 0; phase < 2; phase++) {
       const dHi = phase === 0 ? maxD : Math.max(maxD, 46);   // fallback pass searches the whole map
       for (let t = 0; t < 300; t++) {
-        const a = rnd() * TAU, d = minD + rnd() * (dHi - minD);
+        const a = (arc && phase === 0) ? arc[0] + rnd() * arc[1] : rnd() * TAU;
+        const d = minD + rnd() * (dHi - minD);
         const ox = Math.round(CX + Math.cos(a) * d - w / 2), oy = Math.round(CY + Math.sin(a) * d * 0.8 - h / 2);
         if (!_areaGrass(ox - 1, oy - 1, w + 2, h + 2)) continue;
         if (phase === 0 && !_nearRoad(ox, oy, w, h)) continue;
@@ -143,13 +153,15 @@ window.WM = (function () {
     }
     return null;
   }
-  // carve a short straight lane from (c,r) toward the map centre until it hits a road/plaza
+  // carve a short straight lane from (c,r) toward the map centre until it hits a
+  // road/plaza — through grass AND woods (a hewn lane), so an outskirts building
+  // can never end up sealed behind the tree scatter.
   function _laneToRoad(c, r) {
     const CX = COLS / 2 | 0, CY = ROWS / 2 | 0;
     let x = c, y = r;
     for (let i = 0; i < 14; i++) {
       if (inb(x, y) && (baseGrid[y][x] === T.PATH || baseGrid[y][x] === T.PLAZA)) return;
-      if (inb(x, y) && baseGrid[y][x] === T.GRASS) bset(x, y, T.PATH);
+      if (inb(x, y) && (baseGrid[y][x] === T.GRASS || baseGrid[y][x] === T.TREE)) bset(x, y, T.PATH);
       x += Math.sign(CX - x) || 0; y += Math.sign(CY - y) || 0;
     }
   }
@@ -204,15 +216,27 @@ window.WM = (function () {
       for (let r = 0; r < depth; r++) if (baseGrid[r][c] !== T.PATH) bset(c, r, T.MOUNTAIN);
     }
 
-    // ── scatter buildings organically along the roads (inner: civic/leisure; outer: shops/homes) ──
-    const leisure = [['bar', 'Bar 🍺'], ['arcade', 'Arcade 🕹️'], ['tv', 'Lounge 📺'], ['cafe', 'Café ☕']];
-    const civic = [['church', 'Church ⛪'], ['library', 'Library 📚'], ['townhall', 'Town Hall 🏛️'], ['exec', 'Exec Office 💼'], ['research', 'Research Lab 🔬'],
-                   // the store's four "homeless" systems get real standalone places (self-contained, like the Research Lab — the HQ layout is untouched)
-                   ['mail', 'Mail Room 📬'], ['homelab', 'Homelab 🖥️'], ['pearl', 'Pearl Mine 🦪'], ['assistant', 'AI Assistant 🤖']];
+    // ── DISTRICTED town plan (Iron/Steel-age rework): instead of a uniform scatter the
+    // groups cluster into quarters keyed off the plaza — CIVIC CROWN just north of the
+    // plaza (town hall, church, university, library, boss's office), a LEISURE STRIP
+    // east along the ring road (bar, arcade, lounge, café), an INDUSTRIAL ROW west
+    // (research + the four standalone dept works), shops filling the mid ring and homes
+    // pushed to the outskirts. The 😈 NSFW video store sits alone on the far south edge
+    // of town (boarded up unless the layered NSFW gate is on). Angles: 0=E, π/2=S(+y),
+    // π=W, -π/2=N. All placements still road-seek + fall back, so nothing fails.
+    const NORTH = [-Math.PI / 2 - 0.85, 1.7], EAST = [-0.55, 1.1], WEST = [Math.PI - 0.6, 1.2], SOUTH = [Math.PI / 2 - 0.4, 0.8];
+    const leisure = [['bar', 'Bar 🍺', 7, 6], ['arcade', 'Arcade 🕹️', 7, 6], ['tv', 'Lounge 📺', 6, 5], ['cafe', 'Café ☕', 6, 5]];
+    const civic = [['townhall', 'Grand Town Hall 🏛️', 9, 7], ['church', 'Church ⛪', 7, 8], ['school', 'University 🎓', 10, 8],
+                   ['library', 'Library 📚', 7, 6], ['exec', "Boss's Office 👔", 7, 6]];
+    const industry = [['research', 'Research Lab 🔬', 8, 6],
+                      // the store's four "homeless" systems get real standalone places (self-contained, like the Research Lab — the HQ layout is untouched)
+                      ['mail', 'Mail Room 📬', 6, 5], ['homelab', 'Homelab 🖥️', 6, 6], ['pearl', 'Pearl Mine 🦪', 6, 5], ['assistant', 'AI Assistant 🤖', 6, 5]];
     const shopNames = ['Diner', 'Market', 'Bank', 'Gym', 'Salon', 'Bakery', 'Books', 'Garage', 'Clinic', 'Deli', 'Toys', 'Pharmacy'];
-    for (const [k, lbl] of leisure) _tryPlace(ri(6, 7), ri(5, 6), 12, 26, { kind: 'leisure', loc: k, label: lbl, color: LOC_COLOR[k] || KIND_COLOR.leisure }, rnd, pick, CX, CY);
-    for (const [k, lbl] of civic) _tryPlace(ri(6, 8), ri(5, 7), 13, 28, { kind: k, loc: k, label: lbl, color: KIND_COLOR[k] }, rnd, pick, CX, CY);
-    for (let s = 0; s < 12; s++) _tryPlace(ri(5, 7), ri(5, 6), 13, 36, { kind: 'shop', loc: null, label: pick(shopNames), color: KIND_COLOR.shop, small: true }, rnd, pick, CX, CY);
+    for (const [k, lbl, w, h] of civic) _tryPlace(w, h, 12, 20, { kind: k, loc: k, label: lbl, color: KIND_COLOR[k] }, rnd, pick, CX, CY, NORTH);
+    for (const [k, lbl, w, h] of leisure) _tryPlace(w, h, 12, 22, { kind: 'leisure', loc: k, label: lbl, color: LOC_COLOR[k] || KIND_COLOR.leisure }, rnd, pick, CX, CY, EAST);
+    for (const [k, lbl, w, h] of industry) _tryPlace(w, h, 14, 26, { kind: k, loc: k, label: lbl, color: KIND_COLOR[k] }, rnd, pick, CX, CY, WEST);
+    _tryPlace(6, 5, 26, 38, { kind: 'nsfw', loc: 'nsfw', label: 'Video Store', color: KIND_COLOR.nsfw }, rnd, pick, CX, CY, SOUTH);
+    for (let s = 0; s < 12; s++) _tryPlace(ri(5, 7), ri(5, 6), 13, 32, { kind: 'shop', loc: null, label: pick(shopNames), color: KIND_COLOR.shop, small: true }, rnd, pick, CX, CY);
     for (let h = 0; h < 28; h++) _tryPlace(ri(5, 6), ri(5, 6), 14, 42, { kind: 'house', loc: null, label: '', color: KIND_COLOR.house, house: true }, rnd, pick, CX, CY);
 
     // ── scattered parks with landmark trees, a well, and a couple of fishing ponds ──
@@ -248,6 +272,21 @@ window.WM = (function () {
       if (region(lx - 2, ly - 2, lx + 16, ly + 12, hq) || baseGrid[ly][lx] !== T.GRASS) continue;
       _pond(lx, ly, ri(11, 16), ri(8, 12)); lakes++;
     }
+
+    // ── every FRONT DOOR must open onto passable ground: the tree scatter and the
+    // country lakes run AFTER building placement, so a door could end up sealed
+    // behind woods/water (agents then can't enter — the old "bar nobody could
+    // reach" bug). Clear a small apron outside each door and lane it to the road
+    // net, which also gives every building a walk-up path (a more built-out town).
+    for (const b of buildings) {
+      const [oc, orr] = _doorOut(b);
+      for (let dr2 = -1; dr2 <= 1; dr2++) for (let dc2 = -1; dc2 <= 1; dc2++) {
+        const c2 = oc + dc2, r2 = orr + dr2;
+        if (inb(c2, r2) && (baseGrid[r2][c2] === T.TREE || baseGrid[r2][c2] === T.WATER)) bset(c2, r2, T.GRASS);
+      }
+      _laneToRoad(oc, orr);
+    }
+    _connectTown(CX, CY);   // hard guarantee: no venue/home/node generates cut off from the plaza
     _decorate(rnd, ri, chance);
 
     // resource nodes for idle-skilling — placed on grass in distinct regions, cleared of trees
@@ -257,7 +296,48 @@ window.WM = (function () {
     _placeNode('farm', 15, ROWS - 15, CX, CY);
     _placeNode('build', CX + 15, CY + 11, CX, CY);
     _placeNode('hunt', COLS - 14, ROWS - 14, CX, CY);   // hunting grounds, deep in the wilds with the deer
-    _placeFishNode(CX, CY);
+    _placeOreDeposits();                                 // minable ORE BLOCKS along the mountain fringe (⛏️ → stockpile ore)
+    _placeFishSpots(CX, CY);                             // FISHING spots on real shorelines (🎣 → stockpile fish)
+  }
+
+  // ── MINING ORE DEPOSITS: real ore-block outcrops at the foot of the northern
+  // mountain range — extra 'mine' nodes, so they plug straight into the EXISTING
+  // idle-skilling economy (world_skills: mining → ore → stockpile → construction
+  // costs). Purely more places to mine; no new autonomous behavior is added.
+  function _placeOreDeposits() {
+    for (let k = 0; k < 3; k++) {
+      const tc = Math.round(COLS * (0.22 + 0.28 * k));
+      for (let c = tc; c < tc + 10; c++) {
+        let rTop = -1;
+        for (let r = 1; r < 16; r++) if (baseGrid[r][c] === T.MOUNTAIN) rTop = r;
+        const rr = rTop + 2;                                        // just below the rock face
+        if (rTop < 0 || !inb(c, rr) || baseGrid[rr][c] !== T.GRASS) continue;
+        for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++)
+          if (inb(c + a, rr + b) && baseGrid[rr + b][c + a] === T.TREE) bset(c + a, rr + b, T.GRASS);
+        nodes.push({ col: c, row: rr, kind: 'mine' });
+        break;
+      }
+    }
+  }
+
+  // ── FISHING SPOTS: rod-and-jetty spots on grass beside REAL water (ponds + the
+  // big country lakes), spaced apart so each water body gets its own. Extra 'fish'
+  // nodes — same existing skilling economy (fishing → fish → stockpile).
+  function _placeFishSpots(CX, CY) {
+    const spots = [];
+    for (let r = 2; r < ROWS - 2 && spots.length < 3; r++) for (let c = 2; c < COLS - 2 && spots.length < 3; c++) {
+      if (baseGrid[r][c] !== T.WATER) continue;
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nc = c + dc, nr = r + dr;
+        if (!inb(nc, nr) || baseGrid[nr][nc] !== T.GRASS) continue;
+        if (spots.some(s => Math.hypot(s.col - nc, s.row - nr) < 18)) continue;   // one per water body
+        nodes.push({ col: nc, row: nr, kind: 'fish' });
+        spots.push({ col: nc, row: nr });
+        locations['fish'] = { col: nc, row: nr };
+        break;
+      }
+    }
+    if (!spots.length) _placeNode('fish', CX - 18, CY + 12, CX, CY);   // fallback if no water at all
   }
 
   // find a grass tile near (tc,tr), clear a little glade, register it as a skilling node + location
@@ -270,16 +350,77 @@ window.WM = (function () {
       return;
     }
   }
-  // fishing node: first grass tile adjacent to any pond water
-  function _placeFishNode(CX, CY) {
-    for (let r = 2; r < ROWS - 2; r++) for (let c = 2; c < COLS - 2; c++) {
-      if (baseGrid[r][c] !== T.WATER) continue;
+  // the tile just OUTSIDE a building's door (where visitors stand before entering)
+  function _doorOut(b) {
+    if (b.door === 'N') return [b.c + (b.w >> 1), b.r - 1];
+    if (b.door === 'W') return [b.c - 1, b.r + (b.h >> 1)];
+    if (b.door === 'E') return [b.c + b.w, b.r + (b.h >> 1)];
+    return [b.c + (b.w >> 1), b.r + b.h];
+  }
+
+  // ── CONNECTIVITY GUARANTEE (gen-time only): the organic scatter + lakes can
+  // strand a venue/home/node in a landlocked pocket (school behind a lake, a bar
+  // walled in by woods — agents then path-fail forever). BFS the open terrain
+  // from the plaza; every unreachable door-front / node gets a corridor found by
+  // a tiny Dijkstra that prefers open ground but may carve TREE/WATER into PATH
+  // (a hewn lane / plank causeway). Never touches buildings or mountains.
+  function _connectTown(CX, CY) {
+    const pass = t => t === T.GRASS || t === T.PATH || t === T.PLAZA;
+    const reach = () => {
+      const seen = new Uint8Array(COLS * ROWS), q = [];
+      let sc = CX, sr = CY;                                    // nearest passable tile to the plaza centre
+      outer: for (let rad = 0; rad < 24; rad++) for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
+        if (inb(CX + dc, CY + dr) && pass(baseGrid[CY + dr][CX + dc])) { sc = CX + dc; sr = CY + dr; break outer; }
+      }
+      seen[sr * COLS + sc] = 1; q.push([sc, sr]);
+      for (let i = 0; i < q.length; i++) {
+        const [c, r] = q[i];
+        for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nc = c + dc, nr = r + dr;
+          if (!inb(nc, nr) || seen[nr * COLS + nc] || !pass(baseGrid[nr][nc])) continue;
+          seen[nr * COLS + nc] = 1; q.push([nc, nr]);
+        }
+      }
+      return seen;
+    };
+    const targets = buildings.map(_doorOut).concat(nodes.map(n => [n.col, n.row]));
+    let seen = reach();
+    for (const [tc, tr] of targets) {
+      if (!inb(tc, tr) || seen[tr * COLS + tc]) continue;
+      if (_carveCorridor(tc, tr, seen)) seen = reach();        // recompute after each carve
+    }
+  }
+  // Dijkstra from (c0,r0) to ANY already-reachable cell, then carve the found path
+  function _carveCorridor(c0, r0, seen) {
+    const dist = new Float64Array(COLS * ROWS).fill(Infinity);
+    const prev = new Int32Array(COLS * ROWS).fill(-1);
+    const cost = t => (t === T.GRASS || t === T.PATH || t === T.PLAZA) ? 1
+                    : (t === T.TREE || t === T.WATER) ? 4 : Infinity;   // buildings/mountains: never
+    const pq = [[0, c0 + r0 * COLS]];
+    dist[c0 + r0 * COLS] = 0;
+    let guard = 0;
+    while (pq.length && guard++ < 40000) {
+      pq.sort((a, b) => a[0] - b[0]);                          // tiny frontier; gen-time only
+      const [d, i] = pq.shift();
+      if (d > dist[i]) continue;
+      if (seen[i]) {                                           // met the connected world → carve back
+        for (let j = i; j >= 0; j = prev[j]) {
+          const c = j % COLS, r = (j / COLS) | 0;
+          if (baseGrid[r][c] === T.TREE || baseGrid[r][c] === T.WATER) bset(c, r, T.PATH);
+        }
+        return true;
+      }
+      const c = i % COLS, r = (i / COLS) | 0;
       for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const nc = c + dc, nr = r + dr;
-        if (inb(nc, nr) && baseGrid[nr][nc] === T.GRASS) { nodes.push({ col: nc, row: nr, kind: 'fish' }); locations['fish'] = { col: nc, row: nr }; return; }
+        if (!inb(nc, nr)) continue;
+        const st = cost(baseGrid[nr][nc]);
+        if (!isFinite(st)) continue;
+        const ni = nc + nr * COLS, nd = d + st;
+        if (nd < dist[ni]) { dist[ni] = nd; prev[ni] = i; pq.push([nd, ni]); }
       }
     }
-    _placeNode('fish', CX - 18, CY + 12, CX, CY);   // fallback if no ponds
+    return false;
   }
 
   function _park(x0, y0, w, h, rnd, ri) {
@@ -309,6 +450,7 @@ window.WM = (function () {
 
   // ── stamp a building into `grid` (walls + floor + door) ──
   function _stamp(b) {
+    if (b.kind === 'hq' && b.sections && b.sections.length) return _stampCompound(b);
     for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) if (inb(c, r)) grid[r][c] = T.WALL;
     for (let r = b.r + 1; r < b.r + b.h - 1; r++) for (let c = b.c + 1; c < b.c + b.w - 1; c++) if (inb(c, r)) grid[r][c] = T.FLOOR;
     if (b.kind === 'hq') {                    // organic HQ: chamfered corners (octagon-ish)
@@ -344,8 +486,10 @@ window.WM = (function () {
       _stamp(b);
       const interior = { col: b.c + (b.w / 2 | 0), row: b.r + (b.h / 2 | 0) };
       if (b.kind === 'hq') {
-        const dcx = [b.c + 4, b.c + (b.w / 2 | 0), b.c + b.w - 4], dcy = [b.r + 3, b.r + (b.h / 2 | 0), b.r + b.h - 3];
-        deptKeys.forEach((k, i) => { locations['desk:' + k] = { col: dcx[i % 3], row: dcy[i / 3 | 0] }; });
+        if (!(b.sections && b.sections.length)) {     // compound-stage desks are registered by _hqCompound's struct pass
+          const dcx = [b.c + 4, b.c + (b.w / 2 | 0), b.c + b.w - 4], dcy = [b.r + 3, b.r + (b.h / 2 | 0), b.r + b.h - 3];
+          deptKeys.forEach((k, i) => { locations['desk:' + k] = { col: dcx[i % 3], row: dcy[i / 3 | 0] }; });
+        }
         locations['defense'] = { col: b.c + (b.w / 2 | 0), row: b.r + b.h + 2 };   // rally point south of HQ (raid)
       } else if (b.loc) {
         locations[b.loc] = interior;
@@ -361,21 +505,38 @@ window.WM = (function () {
 
   function build(saved) {
     _genBase();
-    // Capture the freshly-placed NEW department buildings so an OLDER saved layout (which
-    // predates them) can gain them without a destructive full regen that wipes hand-edits.
-    const _NEW_DEPTS = new Set(['mail', 'homelab', 'pearl', 'assistant']);
+    // Capture the freshly-placed NEW buildings so an OLDER saved layout (which predates
+    // them) can gain them without a destructive full regen that wipes hand-edits:
+    // the four standalone dept works + the University 🎓 and the (gated) video store.
+    const _NEW_DEPTS = new Set(['mail', 'homelab', 'pearl', 'assistant', 'school', 'nsfw']);
     const _newDeptBldgs = buildings.filter(b => b.loc && _NEW_DEPTS.has(b.loc)).map(b => ({ ...b }));
+    const _freshNodes = nodes.map(n => ({ ...n }));   // fresh gen's node set (ore deposits + fishing spots)
     if (saved && Array.isArray(saved.buildings) && saved.buildings.length) {
       buildings = saved.buildings.map(b => ({ ...b }));
       _nextId = Math.max(0, ...buildings.map(b => b.id || 0)) + 1;
-      // non-destructive merge: add any new dept building the saved layout is missing, with
-      // a fresh id (so Mail/Homelab/Pearl/Assistant show up; autosave then persists them).
+      // non-destructive merge: add any new building the saved layout is missing, with
+      // a fresh id (so University/Video-Store/Mail/… show up; autosave then persists them).
       const haveLocs = new Set(buildings.map(b => b.loc).filter(Boolean));
       for (const nb of _newDeptBldgs) if (!haveLocs.has(nb.loc)) { nb.id = _nextId++; buildings.push(nb); }
+      // label upgrades ride along for saved maps — ONLY when the label is still the old
+      // default (hand-renamed buildings are never touched).
+      const _RELABEL = { exec: ['Exec Office 💼', "Boss's Office 👔"], townhall: ['Town Hall 🏛️', 'Grand Town Hall 🏛️'] };
+      for (const b of buildings) { const rl = b.loc && _RELABEL[b.loc]; if (rl && b.label === rl[0]) b.label = rl[1]; }
       if (Array.isArray(saved.decor)) decor = saved.decor.map(d => ({ ...d }));
-      if (Array.isArray(saved.nodes) && saved.nodes.length) { nodes = saved.nodes.map(n => ({ ...n })); _rebuildLocations(); }
+      if (Array.isArray(saved.nodes) && saved.nodes.length) {
+        nodes = saved.nodes.map(n => ({ ...n }));
+        // merge in the NEW ore deposits / fishing spots for layouts that predate them:
+        // top the saved count of each kind up to the fresh gen's count (never removes).
+        for (const kind of ['mine', 'fish']) {
+          const have = nodes.filter(n => n.kind === kind).length;
+          const fresh = _freshNodes.filter(n => n.kind === kind);
+          for (let i = have; i < fresh.length; i++) nodes.push({ ...fresh[i] });
+        }
+        _rebuildLocations();
+      }
       if (Array.isArray(saved.landmarks)) landmarks = saved.landmarks.map(l => ({ ...l }));
     }
+    _applyHqStageToBuildings();   // HQ progression stage (era) patches the HQ descriptor before the bake
     _leisureSpots();
     rasterize();
   }
@@ -409,10 +570,17 @@ window.WM = (function () {
     const b = byId(id); if (!b) return;
     b.c = Math.max(1, Math.min(COLS - b.w - 1, Math.round(c)));
     b.r = Math.max(1, Math.min(ROWS - b.h - 1, Math.round(r)));
+    // staged compound HQ: keep the persisted BASE geometry centred on the new
+    // spot (exportLayout saves _baseGeom, so a drag must move it too)
+    if (b.sections && b._baseGeom) {
+      b._baseGeom.c = Math.round(b.c + b.w / 2 - b._baseGeom.w / 2);
+      b._baseGeom.r = Math.round(b.r + b.h / 2 - 1 - b._baseGeom.h / 2);   // -1 mirrors the apply offset
+    }
     rasterize();
   }
   function resizeBuilding(id, dw, dh) {
     const b = byId(id); if (!b) return;
+    if (b.sections) return;    // staged compound HQ: geometry is owned by the stage layout, not the resize handles
     b.w = Math.max(3, Math.min(30, b.w + dw));
     b.h = Math.max(3, Math.min(24, b.h + dh));
     b.c = Math.min(b.c, COLS - b.w - 1); b.r = Math.min(b.r, ROWS - b.h - 1);
@@ -456,8 +624,20 @@ window.WM = (function () {
     rasterize();
     return true;
   }
-  const exportLayout = () => ({ buildings: buildings.map(b => b.interior ? { ...b, interior: b.interior.map(e => ({ ...e })) } : { ...b }), decor,
-                                nodes: nodes.map(n => ({ ...n })), landmarks: landmarks.map(l => ({ ...l })) });
+  // Stage-patched HQ fields (sections/doors/stage*) are VIEW state owned by the
+  // world_hq stage system — never persisted into the layout blob. The hq row
+  // saves its BASE geometry so a load under any stage starts from the original
+  // single-rect descriptor and the active stage re-patches it.
+  const exportLayout = () => ({
+    buildings: buildings.map(b => {
+      const o = b.interior ? { ...b, interior: b.interior.map(e => ({ ...e })) } : { ...b };
+      if (o.sections && o._baseGeom) Object.assign(o, o._baseGeom);
+      delete o.sections; delete o.doors; delete o.stageKey; delete o.stageName; delete o._baseGeom;
+      delete o._tw; delete o._twKey;
+      return o;
+    }),
+    decor,
+    nodes: nodes.map(n => ({ ...n })), landmarks: landmarks.map(l => ({ ...l })) });
 
   // ── AUTO-SAVE (play-god): persist hand edits without a manual 💾 click ──
   // Debounced so a drag/resize burst coalesces into ONE POST after it settles.
@@ -745,6 +925,14 @@ window.WM = (function () {
   function _hqRooms(x, b) {
     if (_structPass) hqRooms = [];        // geometry list rebuilt only on the full pass, not per-chunk
     const ix0 = (b.c + 1) * TILE, iy0 = (b.r + 1) * TILE, iw = (b.w - 2) * TILE, ih = (b.h - 2) * TILE;
+    const g = _deptRoomBands(x, ix0, iy0, iw, ih, DEPT_ORDER);
+    _reception(x, ix0, g.hallY);
+  }
+  // Two rows of department rooms off a central hallway, constrained to an
+  // ARBITRARY interior rect — shared by the classic single-rect HQ (all depts)
+  // and the Iron/Steel-Age office wing (its own dept subset). Pushes hqRooms +
+  // desk locations during the struct pass exactly like before.
+  function _deptRoomBands(x, ix0, iy0, iw, ih, depts) {
     const hallH = Math.max(TILE * 1.2, Math.round(ih * 0.15));
     const topH = Math.floor((ih - hallH) / 2), botH = ih - hallH - topH, hallY = iy0 + topH;
     // ── central hallway floor + carpet runner + planters ──
@@ -755,9 +943,9 @@ window.WM = (function () {
       x.fillStyle = '#6b4c2f'; x.fillRect(px - 2, hallY + hallH - 5, 4, 4);
       x.fillStyle = '#2f8542'; x.beginPath(); x.arc(px, hallY + hallH - 6, 3, 0, 6.283); x.fill();
     }
-    const _half = Math.ceil(DEPT_ORDER.length / 2);
-    const bands = [{ y: iy0, h: topH, depts: DEPT_ORDER.slice(0, _half), door: 'bottom' },
-                   { y: hallY + hallH, h: botH, depts: DEPT_ORDER.slice(_half), door: 'top' }];
+    const _half = Math.ceil(depts.length / 2);
+    const bands = [{ y: iy0, h: topH, depts: depts.slice(0, _half), door: 'bottom' },
+                   { y: hallY + hallH, h: botH, depts: depts.slice(_half), door: 'top' }];
     for (const band of bands) {
       const rw = iw / band.depts.length;
       band.depts.forEach((dept, i) => {
@@ -806,7 +994,10 @@ window.WM = (function () {
         x.strokeStyle = 'rgba(0,0,0,.18)'; x.lineWidth = 3; x.strokeRect(zx + 2.5, zy + 2.5, zw - 5, zh - 5);
       });
     }
-    // reception up front: a welcome desk beside the HQ's hallway entrance
+    return { hallY, hallH };
+  }
+  // reception: a welcome desk beside the hallway entrance
+  function _reception(x, ix0, hallY) {
     x.fillStyle = '#5d4328'; x.fillRect(ix0 + 6, hallY + 3, 22, 6);
     x.fillStyle = 'rgba(255,255,255,.14)'; x.fillRect(ix0 + 6, hallY + 3, 22, 1.5);
     x.fillStyle = '#e8c14a'; x.fillRect(ix0 + 24, hallY + 4, 2, 2);                                 // bell
@@ -865,7 +1056,229 @@ window.WM = (function () {
     }
   }
 
-  const FLOOR_TINT = { shop: 'rgba(70,120,180,.16)', townhall: 'rgba(230,200,80,.14)', exec: 'rgba(230,110,120,.14)', leisure: 'rgba(230,160,70,.14)', church: 'rgba(180,150,235,.15)', library: 'rgba(90,180,130,.14)' };
+  // ══ HQ PROGRESSION STAGES (era snapshots) ══════════════════════════════════
+  // The active stage (GET /api/world/hq/stages, applied by tab-world before
+  // build()) patches the HQ descriptor: the Iron/Steel Age turns it into a
+  // multi-section industrial COMPOUND (office wing + warehouse & shipping +
+  // utilities + open loading yard — explicitly NOT one rectangle), while the
+  // founding stage restores the original single-rect look. Sections are
+  // bbox-local rects; b.doors are the carved wall openings (entrances + the
+  // links BETWEEN sections). All of it is view state — exportLayout strips it.
+  let _hqStage = null;
+  function setHqStage(stage) { _hqStage = stage || null; }
+  function _applyHqStageToBuildings() {
+    const b = buildings.find(x => x.kind === 'hq'); if (!b) return;
+    const st = _hqStage, lay = st && st.layout;
+    if (!(lay && lay.kind === 'compound' && Array.isArray(lay.sections) && lay.sections.length)) {
+      if (b._baseGeom) Object.assign(b, b._baseGeom);        // earlier-era view → original geometry
+      delete b.sections; delete b.doors; delete b.stageKey; delete b.stageName; delete b._baseGeom;
+      return;
+    }
+    if (!b._baseGeom) b._baseGeom = { c: b.c, r: b.r, w: b.w, h: b.h, door: b.door, label: b.label };
+    const cx = b._baseGeom.c + b._baseGeom.w / 2, cy = b._baseGeom.r + b._baseGeom.h / 2;
+    b.w = lay.w; b.h = lay.h;
+    b.c = Math.max(1, Math.min(COLS - lay.w - 1, Math.round(cx - lay.w / 2)));
+    b.r = Math.max(1, Math.min(ROWS - lay.h - 1, Math.round(cy - lay.h / 2) + 1)); // +1 clears the plaza fountain
+    b.door = lay.door || 'S';
+    b.sections = lay.sections.map(s => ({ ...s }));
+    b.doors = (lay.doors || []).map(d => ({ ...d }));
+    b.stageKey = st.key; b.stageName = st.name;
+  }
+  function applyHqStage(stage) {          // live stage switch (era viewer / advance)
+    if (stage !== undefined) _hqStage = stage || null;
+    _applyHqStageToBuildings();
+    rasterize();
+  }
+
+  // stamp the compound footprint: a wall ring PER SECTION, floors inside, the
+  // open yard as walkable paving, then carve every stage door to FLOOR (both the
+  // outside entrances and the section-to-section links) so A* paths through.
+  function _stampCompound(b) {
+    for (const s of b.sections) {
+      const c0 = b.c + s.lc, r0 = b.r + s.lr;
+      for (let r = r0; r < r0 + s.h; r++) for (let c = c0; c < c0 + s.w; c++) {
+        if (!inb(c, r)) continue;
+        if (s.open) { grid[r][c] = T.PLAZA; continue; }      // paved open-air yard (walkable)
+        const edge = r === r0 || r === r0 + s.h - 1 || c === c0 || c === c0 + s.w - 1;
+        grid[r][c] = edge ? T.WALL : T.FLOOR;
+      }
+    }
+    for (const d of (b.doors || [])) { const c = b.c + d.lc, r = b.r + d.lr; if (inb(c, r)) grid[r][c] = T.FLOOR; }
+    if (b.interior) for (const it of b.interior) {           // Layer-3 hand-placed doors still open walls
+      if (it.kind !== 'door') continue;
+      const ic = b.c + it.lc, ir = b.r + it.lr;
+      if (inb(ic, ir)) grid[ir][ic] = T.FLOOR;
+    }
+  }
+
+  // split an edge pixel-span [a0,a1) into segments around door-gap spans
+  function _spanSegs(a0, a1, gaps) {
+    gaps = gaps.filter(g => g[1] > a0 && g[0] < a1).sort((p, q) => p[0] - q[0]);
+    const segs = []; let cur = a0;
+    for (const [g0, g1] of gaps) { if (g0 > cur) segs.push([cur, g0]); cur = Math.max(cur, g1); }
+    if (cur < a1) segs.push([cur, a1]);
+    return segs;
+  }
+  function _sectionShellRects(b, s) {
+    const x0 = (b.c + s.lc) * TILE, y0 = (b.r + s.lr) * TILE, w = s.w * TILE, h = s.h * TILE, wp = WALL_PX;
+    const doors = (b.doors || []).map(d => ({ c: b.c + d.lc, r: b.r + d.lr }));
+    const rowGaps = rr => doors.filter(d => d.r === rr).map(d => [d.c * TILE, (d.c + 1) * TILE]);
+    const colGaps = cc => doors.filter(d => d.c === cc).map(d => [d.r * TILE, (d.r + 1) * TILE]);
+    const rects = [];
+    for (const [g0, g1] of _spanSegs(x0, x0 + w, rowGaps(b.r + s.lr)))           rects.push({ x: g0, y: y0, w: g1 - g0, h: wp, edge: 'T' });
+    for (const [g0, g1] of _spanSegs(x0, x0 + w, rowGaps(b.r + s.lr + s.h - 1))) rects.push({ x: g0, y: y0 + h - wp, w: g1 - g0, h: wp, edge: 'B' });
+    for (const [g0, g1] of _spanSegs(y0, y0 + h, colGaps(b.c + s.lc)))           rects.push({ x: x0, y: g0, w: wp, h: g1 - g0, edge: 'L' });
+    for (const [g0, g1] of _spanSegs(y0, y0 + h, colGaps(b.c + s.lc + s.w - 1))) rects.push({ x: x0 + w - wp, y: g0, w: wp, h: g1 - g0, edge: 'R' });
+    return rects;
+  }
+  // Iron/Steel-Age wall shells: one themed band PER SECTION — riveted steel for
+  // the warehouse/utilities, a modern glass strip on the office wing (the
+  // industrial-plus-modern mix), with door gaps matching the carved openings.
+  function _paintShellCompound(x, b) {
+    for (const s of b.sections) {
+      if (s.open) {                                          // yard: painted curb, no wall ring
+        const sx = (b.c + s.lc) * TILE, sy = (b.r + s.lr) * TILE;
+        x.strokeStyle = 'rgba(216,177,60,.55)'; x.lineWidth = 2;
+        x.setLineDash([6, 5]); x.strokeRect(sx + 2, sy + 2, s.w * TILE - 4, s.h * TILE - 4); x.setLineDash([]);
+        continue;
+      }
+      const theme = s.theme || '#8f98a4';
+      const wall = _shade(theme, -0.10), lite = _shade(theme, 0.40), dark = _shade(theme, -0.34), key = _shade(theme, -0.62);
+      const st = { accent: s.accent || 'rivet', neon: '#3af0d8' };
+      for (const sh of _sectionShellRects(b, s)) {
+        if (sh.w <= 0 || sh.h <= 0) continue;
+        x.fillStyle = wall; x.fillRect(sh.x, sh.y, sh.w, sh.h);
+        if (sh.edge === 'T') { x.fillStyle = lite; x.fillRect(sh.x, sh.y + 1, sh.w, 2); x.fillStyle = dark; x.fillRect(sh.x, sh.y + sh.h - 1, sh.w, 1); x.fillStyle = key; x.fillRect(sh.x, sh.y, sh.w, 1); }
+        else if (sh.edge === 'B') { x.fillStyle = lite; x.fillRect(sh.x, sh.y, sh.w, 1); x.fillStyle = dark; x.fillRect(sh.x, sh.y + sh.h - 3, sh.w, 2); x.fillStyle = key; x.fillRect(sh.x, sh.y + sh.h - 1, sh.w, 1); }
+        else if (sh.edge === 'L') { x.fillStyle = lite; x.fillRect(sh.x + 1, sh.y, 2, sh.h); x.fillStyle = dark; x.fillRect(sh.x + sh.w - 1, sh.y, 1, sh.h); x.fillStyle = key; x.fillRect(sh.x, sh.y, 1, sh.h); }
+        else { x.fillStyle = lite; x.fillRect(sh.x, sh.y, 1, sh.h); x.fillStyle = dark; x.fillRect(sh.x + sh.w - 3, sh.y, 2, sh.h); x.fillStyle = key; x.fillRect(sh.x + sh.w - 1, sh.y, 1, sh.h); }
+        _eraAccent(x, sh, st);                               // rivets / glass band on the wall face
+      }
+    }
+  }
+
+  // ── the compound's interiors, per section (baked like every building) ──
+  const _SECTION_TINT = { office: 'rgba(120,150,190,.14)', warehouse: 'rgba(140,146,158,.20)',
+                          utilities: 'rgba(150,110,70,.16)', yard: 'rgba(90,95,105,.22)' };
+  function _hqCompound(x, b) {
+    if (_structPass) hqRooms = [];
+    for (const s of b.sections) {
+      const sx = (b.c + s.lc) * TILE, sy = (b.r + s.lr) * TILE, sw = s.w * TILE, sh = s.h * TILE;
+      if (s.open) { _yardDetail(x, sx, sy, sw, sh); _sectionLabel(x, s, sx, sy); continue; }
+      const ix0 = sx + TILE, iy0 = sy + TILE, iw = sw - 2 * TILE, ih = sh - 2 * TILE;
+      const useFloor = _floorImg && _floorImg.complete && _floorImg.naturalWidth && iw > 0 && ih > 0;
+      if (useFloor) x.drawImage(_floorImg, ix0, iy0, iw, ih);
+      const tint = _SECTION_TINT[s.key]; if (tint) { x.fillStyle = tint; x.fillRect(ix0, iy0, iw, ih); }
+      if (s.key === 'office') { const g = _deptRoomBands(x, ix0, iy0, iw, ih, s.depts || []); _reception(x, ix0, g.hallY); }
+      else if (s.key === 'warehouse') _warehouseWing(x, s, ix0, iy0, iw, ih);
+      else if (s.key === 'utilities') _utilitiesWing(x, ix0, iy0, iw, ih);
+      x.strokeStyle = 'rgba(0,0,0,.18)'; x.lineWidth = 3; x.strokeRect(ix0 + 1.5, iy0 + 1.5, iw - 3, ih - 3);  // inner AO
+      _sectionLabel(x, s, sx, sy);
+    }
+  }
+  // baked per-section nameplate so each wing reads at a glance
+  function _sectionLabel(x, s, sx, sy) {
+    const t = s.label || s.key;
+    x.font = 'bold 7px sans-serif'; x.textAlign = 'left'; x.textBaseline = 'alphabetic';
+    const tw = x.measureText(t).width;
+    x.fillStyle = 'rgba(10,14,22,.78)'; x.fillRect(sx + 3, sy + 2, tw + 8, 10);
+    x.fillStyle = _hex(s.theme || '#8f98a4', 1); x.fillRect(sx + 3, sy + 2, 2, 10);
+    x.fillStyle = '#e6eefc'; x.fillText(t, sx + 8, sy + 10);
+  }
+  // Warehouse & Shipping: production bays (the five GPU studios) along the top,
+  // and a real shipping floor below — spine conveyor toward the south dock,
+  // steel racking, staged pallets, painted floor lanes. Bays register in
+  // hqRooms so agents, WF machine lines, lights and overlays keep working.
+  function _warehouseWing(x, s, ix0, iy0, iw, ih) {
+    const depts = s.depts || [];
+    const bayH = Math.round(ih * 0.52), bw = iw / Math.max(1, depts.length);
+    depts.forEach((dept, i) => {
+      const zx = ix0 + i * bw, zy = iy0, zw = bw, zh = bayH, cc = DEPT_TINT[dept] || '#8ab';
+      if (_structPass) {
+        hqRooms.push({ dept, x: zx + zw / 2, y: zy + zh / 2, x0: zx, y0: zy, w: zw, h: zh, tint: cc, door: 'bottom' });
+        locations['desk:' + dept] = { col: Math.round(zx / TILE + zw / TILE / 2 - 0.5), row: Math.round(zy / TILE + zh / TILE / 2 - 0.5) };
+      }
+      x.fillStyle = _hex(cc, 0.15); x.fillRect(zx + 1, zy + 1, zw - 2, zh - 2);
+      x.fillStyle = 'rgba(120,126,138,.30)'; x.fillRect(zx + 2, zy + zh * 0.52, zw - 4, zh * 0.30);  // concrete work slab
+      const deskY = zy + zh * 0.24;                                    // bay office corner
+      x.fillStyle = '#5d4328'; x.fillRect(zx + 6, deskY, 16, 6);
+      x.fillStyle = '#1c2530'; x.fillRect(zx + 9, deskY - 5, 9, 5);
+      x.fillStyle = '#7fd0ff'; x.fillRect(zx + 10, deskY - 4, 7, 3);
+      _deptSignature(x, dept, zx, zy, zw, zh, deskY, cc);
+      _roomWalls(x, zx, zy, zw, zh, 'bottom');                         // dividers + a door onto the shipping floor
+    });
+    // ── the shipping floor ──
+    const fy0 = iy0 + bayH, fh = ih - bayH;
+    x.fillStyle = 'rgba(104,110,122,.35)'; x.fillRect(ix0, fy0, iw, fh);        // sealed concrete
+    x.strokeStyle = 'rgba(0,0,0,.15)'; x.lineWidth = 1;
+    for (let gx = ix0 + 26; gx < ix0 + iw; gx += 26) { x.beginPath(); x.moveTo(gx, fy0 + 2); x.lineTo(gx, fy0 + fh - 2); x.stroke(); }  // slab joints
+    const beltY = fy0 + fh * 0.45, bx0 = ix0 + iw * 0.05, bx1 = ix0 + iw * 0.95;
+    x.fillStyle = '#20242c'; x.fillRect(bx0, beltY, bx1 - bx0, 8);              // spine conveyor
+    x.fillStyle = 'rgba(160,170,185,.5)'; for (let rx = bx0 + 3; rx < bx1 - 2; rx += 6) x.fillRect(rx, beltY + 1, 1, 6);
+    for (let rx = bx0; rx < bx1 - 3; rx += 9) {                                  // hazard striping
+      x.fillStyle = '#d8b13c'; x.fillRect(rx, beltY + 10, 4.5, 2);
+      x.fillStyle = '#23262e'; x.fillRect(rx + 4.5, beltY + 10, 4.5, 2);
+    }
+    x.strokeStyle = 'rgba(216,177,60,.5)'; x.lineWidth = 1.4; x.setLineDash([5, 4]);  // floor lanes to the docks
+    x.beginPath(); x.moveTo(ix0 + iw * 0.55, beltY + 12); x.lineTo(ix0 + iw * 0.55, fy0 + fh); x.stroke();
+    x.beginPath(); x.moveTo(bx1, beltY + 4); x.lineTo(ix0 + iw, beltY + 4); x.stroke();
+    x.setLineDash([]);
+    for (let k = 0; k < 3; k++) {                                                // pallets staged at the dock
+      const px = ix0 + iw * (0.62 + k * 0.11), py = fy0 + fh - 14;
+      x.fillStyle = '#8a6a3f'; x.fillRect(px, py, 11, 11);
+      x.fillStyle = '#c89b55'; x.fillRect(px + 1, py + 1, 9, 4); x.fillRect(px + 1, py + 6, 9, 4);
+      x.fillStyle = 'rgba(0,0,0,.3)'; x.fillRect(px + 1, py + 5, 9, 1);
+    }
+    for (let k = 0; k < 2; k++) {                                                // steel racking, west wall
+      const rx = ix0 + 4, ry = fy0 + 6 + k * 16;
+      x.fillStyle = '#39414f'; x.fillRect(rx, ry, 22, 4); x.fillRect(rx, ry + 7, 22, 4);
+      x.fillStyle = '#4a505c'; x.fillRect(rx, ry, 2, 11); x.fillRect(rx + 20, ry, 2, 11);
+      for (let i2 = 0; i2 < 4; i2++) { x.fillStyle = _hex(['#c07a5a', '#7ac0a0', '#d8c090', '#8fb3ff'][i2], .9); x.fillRect(rx + 3 + i2 * 5, ry + 1, 3.5, 2.5); }
+    }
+  }
+  // Utilities: boiler + furnace glow + generator + pipe runs + coal + water tank
+  // — the compound's beating iron heart.
+  function _utilitiesWing(x, ix0, iy0, iw, ih) {
+    x.fillStyle = 'rgba(58,52,46,.35)'; x.fillRect(ix0, iy0, iw, ih);           // soot-dark plate floor
+    x.strokeStyle = 'rgba(0,0,0,.2)'; x.lineWidth = 1;
+    for (let gy = iy0 + 8; gy < iy0 + ih; gy += 8) { x.beginPath(); x.moveTo(ix0, gy); x.lineTo(ix0 + iw, gy); x.stroke(); }
+    const bx = ix0 + iw * 0.28, by = iy0 + ih * 0.45;                            // riveted boiler
+    x.fillStyle = '#6d5f52'; x.beginPath(); x.ellipse(bx, by, 13, 9, 0, 0, 6.283); x.fill();
+    x.fillStyle = '#8a7a6a'; x.beginPath(); x.ellipse(bx - 3, by - 3, 6, 4, 0, 0, 6.283); x.fill();
+    x.fillStyle = 'rgba(232,238,244,.5)'; for (let a = 0; a < 6; a++) x.fillRect(bx - 10 + a * 4, by + 6, 1.2, 1.2);   // rivet row
+    x.fillStyle = '#241d16'; x.fillRect(bx - 4, by - 1, 8, 6);                  // firebox
+    x.fillStyle = '#f0a03c'; x.fillRect(bx - 3, by + 1, 6, 3);                  // fire glow
+    const gx = ix0 + iw * 0.72, gy2 = iy0 + ih * 0.40;                           // generator block
+    x.fillStyle = '#39414f'; x.fillRect(gx - 8, gy2 - 6, 16, 12);
+    x.fillStyle = '#2c313c'; x.fillRect(gx - 8, gy2 - 6, 16, 3);
+    x.fillStyle = '#7fd0ff'; x.fillRect(gx - 5, gy2 - 2, 3, 3); x.fillRect(gx + 2, gy2 - 2, 3, 3);   // dials
+    x.strokeStyle = '#6a7280'; x.lineWidth = 2.4;                                // pipe run, top wall
+    x.beginPath(); x.moveTo(ix0 + 2, iy0 + 4); x.lineTo(ix0 + iw - 2, iy0 + 4); x.stroke();
+    x.strokeStyle = '#4a505c'; x.lineWidth = 1;
+    for (let px2 = ix0 + 8; px2 < ix0 + iw - 4; px2 += 12) { x.beginPath(); x.moveTo(px2, iy0 + 2); x.lineTo(px2, iy0 + 7); x.stroke(); }
+    x.fillStyle = '#1c1f26'; x.beginPath(); x.ellipse(ix0 + iw * 0.15, iy0 + ih - 7, 9, 4.5, 0, 0, 6.283); x.fill();   // coal pile
+    x.fillStyle = '#31353f'; x.beginPath(); x.ellipse(ix0 + iw * 0.13, iy0 + ih - 8.5, 5, 2.6, 0, 0, 6.283); x.fill();
+    x.fillStyle = '#5b6c7c'; x.beginPath(); x.arc(ix0 + iw - 12, iy0 + ih - 10, 6.5, 0, 6.283); x.fill();             // water tank
+    x.fillStyle = '#7d8f9f'; x.beginPath(); x.arc(ix0 + iw - 13.5, iy0 + ih - 11.5, 2.6, 0, 6.283); x.fill();
+  }
+  // open-air loading yard: crates, pallets, a fuel drum on the painted apron
+  function _yardDetail(x, sx, sy, sw, sh2) {
+    x.fillStyle = 'rgba(96,100,110,.30)'; x.fillRect(sx, sy, sw, sh2);          // work-worn paving wash
+    for (let k = 0; k < 3; k++) {
+      const px = sx + 5, py = sy + 8 + k * 22;
+      x.fillStyle = '#8a6238'; x.fillRect(px, py, 12, 11);
+      x.fillStyle = '#a9763f'; x.fillRect(px, py, 12, 2);
+      x.strokeStyle = '#5a3d24'; x.lineWidth = 1; x.strokeRect(px, py, 12, 11);
+    }
+    x.fillStyle = '#8a3f3f'; x.beginPath(); x.arc(sx + sw - 12, sy + 14, 5, 0, 6.283); x.fill();   // fuel drum
+    x.fillStyle = '#a95555'; x.beginPath(); x.arc(sx + sw - 13, sy + 12.5, 2, 0, 6.283); x.fill();
+    x.fillStyle = '#8a6a3f'; x.fillRect(sx + sw - 20, sy + sh2 - 18, 11, 11);                       // pallet
+    x.fillStyle = '#c89b55'; x.fillRect(sx + sw - 19, sy + sh2 - 17, 9, 4); x.fillRect(sx + sw - 19, sy + sh2 - 12, 9, 4);
+  }
+
+  const FLOOR_TINT = { shop: 'rgba(70,120,180,.16)', townhall: 'rgba(230,200,80,.14)', exec: 'rgba(230,110,120,.14)', leisure: 'rgba(230,160,70,.14)', church: 'rgba(180,150,235,.15)', library: 'rgba(90,180,130,.14)',
+                       school: 'rgba(110,170,220,.14)', nsfw: 'rgba(90,70,95,.18)', research: 'rgba(129,140,248,.12)',
+                       mail: 'rgba(230,150,190,.10)', homelab: 'rgba(100,170,230,.12)', pearl: 'rgba(120,220,180,.10)', assistant: 'rgba(180,150,230,.10)' };
 
   function _doorPx(b) {
     let dc, dr;
@@ -880,11 +1293,33 @@ window.WM = (function () {
   // Muted stone/plaster wall tones per kind (fallback = house). A building may carry
   // its own b.theme (a hex colour) which round-trips through exportLayout; when absent
   // the tone derives from b.kind. The picker UI is a later task — support b.theme now.
-  const _WALL_PAL = { hq: '#8b909c', house: '#9a8b76', shop: '#7f93ab', leisure: '#c19a5e',
-                      townhall: '#bda257', exec: '#ab6a6a', church: '#897fb0', library: '#5f9a86',
-                      research: '#7d86cf',
-                      mail: '#c58aa6', homelab: '#5f8ab0', pearl: '#7ab098', assistant: '#9a86c5' };
-  function _themeForKind(kind) { return _WALL_PAL[kind] || _WALL_PAL.house; }
+  // Iron & Steel Age restyle: the non-HQ set drops the pastel-plaster "house" look for
+  // the HQ compound's materials — riveted steel plate, kiln brick, soot iron, with a
+  // glass band on the civic/office fronts. Tones match IRON_STEEL_LAYOUT's section
+  // themes (#9aa3ad office / #77675a utilities / #7e8894 warehouse) so the whole town
+  // reads as one industrial company. Keyed by LOC first (bar ≠ arcade ≠ café), then kind.
+  const _WALL_PAL = { hq: '#8b909c', house: '#9a8b76', shop: '#9e5a42', leisure: '#8a7462',
+                      townhall: '#8f98a4', exec: '#7e8894', church: '#8a7080', library: '#77675a',
+                      research: '#7d86cf', school: '#9aa3ad', nsfw: '#5d5560',
+                      mail: '#8a7284', homelab: '#5f7284', pearl: '#6a8478', assistant: '#7a7490' };
+  const _WALL_LOC = { bar: '#8a5a48', arcade: '#5c5570', tv: '#5f7284', cafe: '#9e6a4a' };
+  // per-building material texture (reuses the era-accent painter): rivet = steel plate,
+  // brick = kiln brick, glass = office band, neon = signage trim, plank = timber homes
+  const _WALL_ACCENT = { hq: 'rivet', house: 'plank', shop: 'brick', leisure: 'brick',
+                         townhall: 'glass', exec: 'glass', church: 'brick', library: 'brick',
+                         research: 'rivet', school: 'glass', nsfw: 'plank',
+                         mail: 'rivet', homelab: 'rivet', pearl: 'rivet', assistant: 'panel',
+                         bar: 'brick', arcade: 'neon', tv: 'rivet', cafe: 'brick' };
+  const _WALL_NEON = { arcade: '#a26cf0', nsfw: '#f06aa8' };
+  function _themeFor(b) {
+    if (b.loc === 'nsfw' && _nsfwOn()) return '#7a4460';               // open for business: plum neon-lit front
+    return (b.loc && _WALL_LOC[b.loc]) || _WALL_PAL[b.kind] || _WALL_PAL.house;
+  }
+  function _accentFor(b) {
+    const k = (b.loc === 'nsfw') ? (_nsfwOn() ? 'neon' : 'plank') : null;   // boarded-up timber until the gate opens
+    const acc = k || _WALL_ACCENT[b.loc] || _WALL_ACCENT[b.kind];
+    return acc ? { accent: acc, neon: _WALL_NEON[b.loc] || '#3af0d8' } : null;
+  }
   // lighten (f>0) / darken (f<0) a #rrggbb toward white / black
   function _shade(hex, f) {
     const n = parseInt((hex || '#888').slice(1), 16); let R = (n >> 16) & 255, G = (n >> 8) & 255, B = n & 255;
@@ -986,17 +1421,20 @@ window.WM = (function () {
   // image swap. Skips the pure startup null→"" (no era data) transition to avoid a wasted bake.
   let _lastEraSig = null;
   function _eraSig() {
-    const e = _erasObj(); if (!e) return '';
-    let s = 't' + (e.town ?? 0);
+    // the 😈 NSFW-store gate is part of the signature too: its boarded↔open look is
+    // BAKED (shell + interior), so a gate flip must re-bake exactly like an era change.
+    let s = 'nx' + (_nsfwOn() ? 1 : 0);
+    const e = _erasObj(); if (!e) return s;
+    s += '|t' + (e.town ?? 0);
     if (e.byLoc) for (const b of buildings) if (b.loc != null && e.byLoc[b.loc] != null) s += '|' + b.loc + ':' + (e.byLoc[b.loc] | 0);
     return s;
   }
   function _eraRebakeCheck() {
     const sig = _eraSig();
+    if (_lastEraSig === null) { _lastEraSig = sig; return; }   // first frame = baseline (the build() bake already used it)
     if (sig === _lastEraSig) return;
-    const prev = _lastEraSig;
     _lastEraSig = sig;
-    if (_overview && (sig !== '' || (prev !== null && prev !== ''))) _bake();   // era appeared / changed / reverted
+    if (_overview) _bake();                                    // era / gate appeared, changed or reverted
   }
 
   // Paint the themed wall band so it reads UNMISTAKABLY as a wall standing proud of the
@@ -1004,8 +1442,10 @@ window.WM = (function () {
   // on the OUTER pixel (separates the building from the ground) + a lit highlight just
   // inside it + a shadow on the INNER pixel (where the wall meets the interior floor).
   function _paintShell(x, b) {
+    if (b.sections && b.sections.length) return _paintShellCompound(x, b);   // staged compound HQ: per-section themed shells
     const est = eraStyle(b);                                // civilization era (null → today's per-kind theme)
-    const theme = est ? est.wall : (b.theme || _themeForKind(b.kind));
+    const theme = est ? est.wall : (b.theme || _themeFor(b));
+    const acc = est || _accentFor(b);                       // era accent wins; else the Iron/Steel per-kind material
     const wall = _shade(theme, -0.10);                      // wall face — a touch deeper than the theme so it's never floor-coloured
     const lite = _shade(theme, 0.40), dark = _shade(theme, -0.34);
     const key = _shade(theme, -0.62);                       // crisp outer keyline against the terrain
@@ -1029,7 +1469,7 @@ window.WM = (function () {
         x.fillStyle = dark; x.fillRect(s.x + s.w - 3, s.y, 2, s.h);
         x.fillStyle = key; x.fillRect(s.x + s.w - 1, s.y, 1, s.h);
       }
-      if (est) _eraAccent(x, s, est);                        // per-era material texture on top of the wall face
+      if (acc) _eraAccent(x, s, acc);                        // material texture (era, or the Iron/Steel kind accent) on the wall face
     }
   }
   const _drawBuildingShell = _paintShell;                   // painted per-region into the overview + chunks by _paintRegion()
@@ -1100,6 +1540,7 @@ window.WM = (function () {
 
   // per-building detail: floor tint, roof/awning trim, door, sign, interior furniture
   function _building(x, b) {
+    if (b.kind === 'hq' && b.sections && b.sections.length) { _hqCompound(x, b); return; }   // staged compound HQ
     const bx = b.c * TILE, by = b.r * TILE, bw = b.w * TILE, bh = b.h * TILE;
     // Layer-2b: ONE shared generated interior-floor texture (warm planks/tiles) as
     // the base under every interior, then the per-kind FLOOR_TINT washed OVER it at
@@ -1117,11 +1558,22 @@ window.WM = (function () {
       x.fillStyle = 'rgba(255,255,255,.18)'; x.fillRect(bx, by, bw, 1);
       x.fillStyle = 'rgba(0,0,0,.3)'; x.fillRect(bx, by + (b.kind === 'hq' ? 6 : 4), bw, 1);
     }
-    // door
-    const d = _doorPx(b), dx = d.c * TILE, dy = d.r * TILE;
-    x.fillStyle = '#5b3a22'; x.fillRect(dx + 4, dy + 3, TILE - 8, TILE - 3);
-    x.fillStyle = '#734a2c'; x.fillRect(dx + 4, dy + 3, TILE - 8, 2);
-    x.fillStyle = '#e8c14a'; x.fillRect(dx + TILE - 7, dy + TILE / 2, 2, 2);           // knob
+    // door — panel sized/positioned off WALL_PX so it sits flush in the (thin) wall band on
+    // the door's own side, instead of the old full-tile-thick rect that overhangs into the
+    // interior floor. N/S bands run horizontal across the tile; W/E bands run vertical.
+    const d = _doorPx(b), dx = d.c * TILE, dy = d.r * TILE, side = d.side;
+    let px, py, pw, ph;
+    if (side === 'N') { px = dx + 4; py = dy - 2; pw = TILE - 8; ph = WALL_PX + 4; }
+    else if (side === 'W') { px = dx - 2; py = dy + 4; pw = WALL_PX + 4; ph = TILE - 8; }
+    else if (side === 'E') { px = dx + TILE - WALL_PX - 2; py = dy + 4; pw = WALL_PX + 4; ph = TILE - 8; }
+    else { px = dx + 4; py = dy + TILE - WALL_PX - 2; pw = TILE - 8; ph = WALL_PX + 4; }   // S (default)
+    x.fillStyle = '#5b3a22'; x.fillRect(px, py, pw, ph);
+    x.fillStyle = '#734a2c';
+    if (side === 'W' || side === 'E') x.fillRect(px, py, 2, ph); else x.fillRect(px, py, pw, 2);
+    x.fillStyle = '#e8c14a';                                                          // knob
+    if (side === 'W') x.fillRect(px + pw - 4, dy + TILE / 2 - 1, 2, 2);
+    else if (side === 'E') x.fillRect(px + 2, dy + TILE / 2 - 1, 2, 2);
+    else x.fillRect(dx + TILE - 7, py + ph / 2 - 1, 2, 2);
     // hanging sign near the door for named/shop buildings
     if (b.label && b.kind !== 'hq' && b.kind !== 'house') {
       x.fillStyle = _hex(b.color, .95); x.fillRect(dx + 2, dy - 6, TILE - 4, 5);
@@ -1136,8 +1588,10 @@ window.WM = (function () {
       if (b.kind === 'hq') { WA.drawSprite(x, bn, bx + bw * 0.30, byb, bh2); WA.drawSprite(x, bn, bx + bw * 0.70, byb, bh2); }
       else if (b.label) WA.drawSprite(x, bn, bx + bw / 2, byb, bh2);
     }
-    // interior furniture: a rug + a potted plant (skip HQ — it has desks)
-    if (b.kind !== 'hq' && b.w >= 5 && b.h >= 5) {
+    // interior furnishing: named venues get a REAL bespoke interior (bar counter,
+    // pews, arcade cabinets, lecture hall…). Everything else keeps the classic
+    // rug + barrel/crate look. Houses keep their full _homeFurnish below.
+    if (b.kind !== 'hq' && b.w >= 5 && b.h >= 5 && !_venueFurnish(x, b, bx, by, bw, bh)) {
       const cxp = bx + bw / 2, cyp = by + bh / 2;
       x.fillStyle = _hex(b.color, .20); x.beginPath(); x.roundRect(cxp - TILE * 0.9, cyp - TILE * 0.55, TILE * 1.8, TILE * 1.1, 3); x.fill();
       x.strokeStyle = _hex(b.color, .5); x.lineWidth = 1; x.stroke();
@@ -1154,6 +1608,299 @@ window.WM = (function () {
     }
     if (b.kind === 'house') _homeFurnish(x, b, bx, by, bw, bh);   // beds, table — lived-in homes
   }
+
+  // ══ VENUE INTERIORS — the Iron/Steel-age build-out ═══════════════════════════
+  // Every named venue is furnished like an HQ wing instead of the one-size rug:
+  // pews + altar in the ✝️ church, a bar counter + kegs in 😈 Satan's bar, arcade
+  // cabinet rows, the 🎓 University's lecture hall + knowledge-graph lab, the
+  // council chamber, the boss's office, lab benches, shop shelves… All BAKED
+  // (zero per-frame cost). Returns false for buildings with no bespoke interior
+  // (houses / unknown kinds) so the caller keeps the classic look.
+  function _venueFurnish(x, b, bx, by, bw, bh) {
+    const fn = _VENUES[b.loc || b.kind];
+    if (!fn) return false;
+    const ix = bx + TILE, iy = by + TILE, iw = bw - 2 * TILE, ih = bh - 2 * TILE;
+    if (iw < TILE * 2 || ih < TILE * 2) return false;
+    fn(x, b, ix, iy, iw, ih);
+    x.strokeStyle = 'rgba(0,0,0,.16)'; x.lineWidth = 3;                    // inner AO — the room reads enclosed
+    x.strokeRect(ix + 1.5, iy + 1.5, iw - 3, ih - 3);
+    return true;
+  }
+  // tiny shared pieces
+  function _vChair(x, cx, cy, tone) { x.fillStyle = tone || '#39414f'; x.beginPath(); x.arc(cx, cy, 3, 0, 6.283); x.fill(); }
+  function _vTable(x, cx, cy, r) {
+    x.fillStyle = '#5a3d24'; x.beginPath(); x.arc(cx, cy, r + 1.5, 0, 6.283); x.fill();
+    x.fillStyle = '#7a5230'; x.beginPath(); x.arc(cx, cy, r, 0, 6.283); x.fill();
+  }
+  function _vShelfRow(x, sx, sy, w, colors) {                              // stocked display shelf
+    x.fillStyle = '#4a3b2a'; x.fillRect(sx, sy, w, 8);
+    x.fillStyle = 'rgba(0,0,0,.3)'; x.fillRect(sx, sy + 3.5, w, 1);
+    for (let i = 0; i * 5 < w - 4; i++) { x.fillStyle = colors[i % colors.length]; x.fillRect(sx + 2 + i * 5, sy + 1, 3.5, 2.5); x.fillRect(sx + 2 + i * 5, sy + 5, 3.5, 2.5); }
+  }
+  const _VENUES = {
+    // ── 🍺 BAR — 😈 Satan's haunt: long counter, taps, kegs, bottle shelf, tables ──
+    bar(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(90,40,30,.16)'; x.fillRect(ix, iy, iw, ih);                       // warm tavern wash
+      _vShelfRow(x, ix + 3, iy + 2, iw * 0.62, ['#c25b4e', '#e8c14a', '#8fc7a9', '#d97ac0']);  // bottle wall
+      x.fillStyle = '#4a3120'; x.fillRect(ix + 3, iy + 12, iw * 0.62, 7);                   // the bar counter
+      x.fillStyle = '#6e4a2b'; x.fillRect(ix + 3, iy + 12, iw * 0.62, 2);
+      x.fillStyle = '#c9b488'; for (let i = 0; i < 3; i++) x.fillRect(ix + 8 + i * 12, iy + 11, 2, 3);   // taps
+      for (let i = 0; i < Math.min(4, (iw * 0.62 / 12) | 0); i++) _vChair(x, ix + 9 + i * 12, iy + 24);  // stools
+      for (let k = 0; k < 2; k++) {                                                          // kegs, bottom-left
+        x.fillStyle = '#6e4a2b'; x.beginPath(); x.arc(ix + 8 + k * 12, iy + ih - 8, 5, 0, 6.283); x.fill();
+        x.fillStyle = '#8a6238'; x.beginPath(); x.arc(ix + 8 + k * 12, iy + ih - 8, 3, 0, 6.283); x.fill();
+        x.fillStyle = '#3a2a1a'; x.fillRect(ix + 4 + k * 12, iy + ih - 9, 8, 1);
+      }
+      _vTable(x, ix + iw - 14, iy + ih * 0.4, 5); _vChair(x, ix + iw - 22, iy + ih * 0.4); _vChair(x, ix + iw - 6, iy + ih * 0.4);
+      _vTable(x, ix + iw - 14, iy + ih - 10, 5); _vChair(x, ix + iw - 22, iy + ih - 10);
+      x.fillStyle = '#c0303a'; x.fillRect(ix + iw * 0.66, iy + 2, 10, 8);                    // 😈 house sign
+      x.font = '7px sans-serif'; x.textAlign = 'left'; x.fillText('😈', ix + iw * 0.66 + 1, iy + 9);
+    },
+    // ── 🕹️ ARCADE — cabinet rows with glowing screens + prize counter ──
+    arcade(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(50,40,90,.22)'; x.fillRect(ix, iy, iw, ih);                        // dim neon-den wash
+      const scr = ['#7fd0ff', '#8fe0a0', '#f0a860', '#d97ac0'];
+      const n = Math.min(3, ((ih - 10) / 15) | 0);
+      for (let s2 = 0; s2 < 2; s2++) for (let i = 0; i < n; i++) {                           // cabinets on both side walls
+        const cxp = s2 ? ix + iw - 11 : ix + 3, cyp = iy + 4 + i * 15;
+        x.fillStyle = '#232838'; x.fillRect(cxp, cyp, 8, 12);
+        x.fillStyle = scr[(i + s2) % 4]; x.fillRect(cxp + 1.5, cyp + 2, 5, 4);               // glowing screen
+        x.fillStyle = '#e8c14a'; x.fillRect(cxp + 2.5, cyp + 8, 1.5, 1.5); x.fillRect(cxp + 5, cyp + 8, 1.5, 1.5);  // buttons
+      }
+      x.fillStyle = 'rgba(162,108,240,.30)'; x.fillRect(ix + 13, iy + 4, iw - 26, 2);        // neon ceiling strip
+      x.fillStyle = '#5d4328'; x.fillRect(ix + iw / 2 - 11, iy + ih - 9, 22, 6);             // prize counter
+      x.fillStyle = '#d97ac0'; x.fillRect(ix + iw / 2 - 8, iy + ih - 8, 3, 3);
+      x.fillStyle = '#8fe0a0'; x.fillRect(ix + iw / 2 + 2, iy + ih - 8, 3, 3);
+    },
+    // ── ☕ CAFÉ — espresso counter + pastry case + round tables ──
+    cafe(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(180,130,80,.14)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = '#8b8f98'; x.fillRect(ix + 3, iy + 3, iw * 0.5, 7);                      // counter
+      x.fillStyle = '#2a2f3a'; x.fillRect(ix + 5, iy + 1, 7, 5);                             // espresso machine
+      x.fillStyle = '#e8c14a'; x.fillRect(ix + 6, iy + 2, 2, 2);
+      x.fillStyle = '#bfe3ff'; x.fillRect(ix + 15, iy + 4, 9, 4);                            // pastry case
+      x.fillStyle = '#d8a050'; x.fillRect(ix + 16, iy + 5, 2, 2); x.fillRect(ix + 19, iy + 5, 2, 2);
+      for (let i = 0; i < 3; i++) {
+        const tx = ix + 10 + (i % 2) * (iw - 24), ty = iy + ih * 0.5 + (i > 1 ? 12 : 0) + (i % 2) * 4;
+        _vTable(x, tx, ty, 4.5); _vChair(x, tx - 7, ty); _vChair(x, tx + 7, ty);
+      }
+    },
+    // ── 📺 LOUNGE — big screen + sofa rows ──
+    tv(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(40,60,90,.16)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = '#10141c'; x.fillRect(ix + iw * 0.2, iy + 2, iw * 0.6, 9);               // the big screen
+      x.fillStyle = '#3f7fb0'; x.fillRect(ix + iw * 0.2 + 1, iy + 3, iw * 0.6 - 2, 7);
+      x.fillStyle = 'rgba(255,255,255,.25)'; x.fillRect(ix + iw * 0.22, iy + 4, iw * 0.18, 2);
+      for (let r2 = 0; r2 < 2; r2++) {                                                       // sofas facing it
+        const sy = iy + ih * 0.45 + r2 * 12;
+        x.fillStyle = '#7a4a3f'; x.fillRect(ix + iw * 0.18, sy, iw * 0.64, 8);
+        x.fillStyle = '#9a5f4f'; x.fillRect(ix + iw * 0.18, sy, iw * 0.64, 2.5);
+        x.fillStyle = 'rgba(0,0,0,.25)'; x.fillRect(ix + iw * 0.18, sy + 7, iw * 0.64, 1);
+      }
+      _vTable(x, ix + iw * 0.5, iy + ih - 7, 4);                                             // popcorn table
+      x.fillStyle = '#e8c14a'; x.fillRect(ix + iw * 0.5 - 1.5, iy + ih - 9, 3, 2);
+    },
+    // ── ⛪ CHURCH — ✝️ Jesus: aisle, pews, altar + gold cross, candles, glass ──
+    church(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(190,170,220,.10)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = 'rgba(150,96,72,.35)'; x.fillRect(ix + iw / 2 - 4, iy, 8, ih);           // centre aisle runner
+      x.fillStyle = '#a8a2b8'; x.fillRect(ix + iw * 0.24, iy + 1, iw * 0.52, 8);             // altar dais
+      x.fillStyle = '#efe6d2'; x.fillRect(ix + iw / 2 - 6, iy + 3, 12, 5);                   // altar table
+      x.fillStyle = '#e8c14a';                                                               // gold cross
+      x.fillRect(ix + iw / 2 - 1, iy + 1 - 8, 2, 9); x.fillRect(ix + iw / 2 - 4, iy - 4.5, 8, 2);
+      x.fillStyle = '#e8c14a'; x.fillRect(ix + iw * 0.26, iy + 3, 2, 3); x.fillRect(ix + iw * 0.72, iy + 3, 2, 3);  // candles
+      x.fillStyle = '#f0a03c'; x.fillRect(ix + iw * 0.26, iy + 2, 2, 1.5); x.fillRect(ix + iw * 0.72, iy + 2, 2, 1.5);
+      const rows = Math.min(4, ((ih - 14) / 9) | 0);
+      for (let r2 = 0; r2 < rows; r2++) {                                                    // pew columns face the altar
+        const py = iy + 13 + r2 * 9;
+        x.fillStyle = '#6e4a2b'; x.fillRect(ix + 3, py, iw / 2 - 9, 5); x.fillRect(ix + iw / 2 + 6, py, iw / 2 - 9, 5);
+        x.fillStyle = '#8a6238'; x.fillRect(ix + 3, py, iw / 2 - 9, 1.5); x.fillRect(ix + iw / 2 + 6, py, iw / 2 - 9, 1.5);
+      }
+      x.fillStyle = 'rgba(120,160,235,.35)'; x.fillRect(ix + 1, iy + 6, 2, 10);              // stained-glass light
+      x.fillStyle = 'rgba(235,120,140,.35)'; x.fillRect(ix + iw - 3, iy + 6, 2, 10);
+    },
+    // ── 📚 LIBRARY — stacks + reading tables ──
+    library(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(90,150,120,.10)'; x.fillRect(ix, iy, iw, ih);
+      const spines = ['#c25b4e', '#4e7fc2', '#57a06a', '#c2a44e', '#8a5fb0'];
+      const rows = Math.min(3, ((ih - 16) / 12) | 0);
+      for (let r2 = 0; r2 < rows; r2++) _vShelfRow(x, ix + 3, iy + 2 + r2 * 12, iw - 6, spines);
+      const ty = iy + ih - 9;
+      x.fillStyle = '#5d4328'; x.fillRect(ix + 5, ty, 18, 6); x.fillRect(ix + iw - 23, ty, 18, 6);   // reading tables
+      x.fillStyle = '#ffe9a8'; x.fillRect(ix + 12, ty + 1, 3, 2); x.fillRect(ix + iw - 16, ty + 1, 3, 2);  // lamps
+      _vChair(x, ix + 14, ty + 9); _vChair(x, ix + iw - 14, ty + 9);
+    },
+    // ── 🎓 UNIVERSITY — the knowledge campus: lecture hall (Library/Live-Docs) +
+    //    research wing with a glowing KNOWLEDGE-GRAPH board + terminal + flasks ──
+    school(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(110,170,220,.10)'; x.fillRect(ix, iy, iw, ih);
+      const mid = ix + iw * 0.55;
+      x.strokeStyle = 'rgba(44,33,22,.7)'; x.lineWidth = 2;                                  // partition wall + door gap
+      x.beginPath(); x.moveTo(mid, iy); x.lineTo(mid, iy + ih * 0.35); x.moveTo(mid, iy + ih * 0.65); x.lineTo(mid, iy + ih); x.stroke();
+      // LECTURE HALL (left): blackboard + desk rows
+      x.fillStyle = '#1e3a2c'; x.fillRect(ix + 4, iy + 2, mid - ix - 10, 8);                 // blackboard
+      x.strokeStyle = 'rgba(240,240,220,.6)'; x.lineWidth = 0.8;
+      x.beginPath(); x.moveTo(ix + 7, iy + 5); x.lineTo(mid - 12, iy + 5); x.moveTo(ix + 7, iy + 7.5); x.lineTo(mid - 18, iy + 7.5); x.stroke();
+      const drows = Math.min(3, ((ih - 16) / 10) | 0), dcols = Math.max(2, ((mid - ix - 8) / 14) | 0);
+      for (let r2 = 0; r2 < drows; r2++) for (let c2 = 0; c2 < dcols; c2++) {
+        const dx2 = ix + 5 + c2 * 14, dy2 = iy + 14 + r2 * 10;
+        x.fillStyle = '#5d4328'; x.fillRect(dx2, dy2, 10, 5);
+        x.fillStyle = '#efe6d2'; x.fillRect(dx2 + 3, dy2 + 1, 4, 2);                          // open book
+        _vChair(x, dx2 + 5, dy2 + 8, '#4a505c');
+      }
+      // KNOWLEDGE LAB (right): graph board (nodes+edges), bookshelf, terminal, flasks
+      const lx = mid + 4, lw = ix + iw - lx - 3;
+      x.fillStyle = '#0e1626'; x.fillRect(lx, iy + 2, lw, 12);                                // the knowledge-graph board
+      x.strokeStyle = 'rgba(110,180,240,.55)'; x.lineWidth = 0.8;
+      const gn = [[0.15, 0.3], [0.45, 0.7], [0.5, 0.2], [0.8, 0.5], [0.9, 0.15]].map(([u, v]) => [lx + u * lw, iy + 3 + v * 10]);
+      x.beginPath(); for (const [i2, j2] of [[0, 1], [0, 2], [2, 3], [1, 3], [3, 4], [2, 4]]) { x.moveTo(gn[i2][0], gn[i2][1]); x.lineTo(gn[j2][0], gn[j2][1]); } x.stroke();
+      for (let i2 = 0; i2 < gn.length; i2++) { x.fillStyle = ['#7fd0ff', '#8fe0a0', '#f0a860', '#d97ac0', '#e8c14a'][i2]; x.beginPath(); x.arc(gn[i2][0], gn[i2][1], 1.6, 0, 6.283); x.fill(); }
+      _vShelfRow(x, lx, iy + 17, lw, ['#c25b4e', '#4e7fc2', '#57a06a', '#c2a44e']);           // research stacks
+      x.fillStyle = '#5d4328'; x.fillRect(lx + 1, iy + ih - 9, 12, 6);                        // live-docs terminal
+      x.fillStyle = '#1c2530'; x.fillRect(lx + 3, iy + ih - 14, 8, 5);
+      x.fillStyle = '#8fe0a0'; x.fillRect(lx + 4, iy + ih - 13, 6, 3);
+      x.fillStyle = '#39414f'; x.fillRect(lx + lw - 12, iy + ih - 9, 10, 6);                  // flask bench
+      x.fillStyle = '#7fd0ff'; x.fillRect(lx + lw - 10, iy + ih - 12, 2, 3);
+      x.fillStyle = '#d97ac0'; x.fillRect(lx + lw - 6, iy + ih - 12, 2, 3);
+    },
+    // ── 🏛️ GRAND TOWN HALL — council chamber: podium, long table, flags, ballot ──
+    townhall(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(230,200,90,.08)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = 'rgba(150,96,72,.28)'; x.fillRect(ix + iw / 2 - 5, iy + ih * 0.4, 10, ih * 0.6);   // ceremonial runner
+      x.fillStyle = '#8b8f98'; x.fillRect(ix + iw / 2 - 8, iy + 2, 16, 7);                    // podium dais
+      x.fillStyle = '#5d4328'; x.fillRect(ix + iw / 2 - 4, iy + 3, 8, 5);                     // lectern
+      x.fillStyle = '#e8c14a'; x.beginPath(); x.arc(ix + iw / 2, iy + 5.5, 1.6, 0, 6.283); x.fill();   // gold seal
+      x.fillStyle = '#c0303a'; x.fillRect(ix + 4, iy + 2, 3, 9); x.fillStyle = '#3f5fb0'; x.fillRect(ix + iw - 7, iy + 2, 3, 9);  // flags
+      x.fillStyle = '#5d4328'; x.fillRect(ix + 6, iy + ih * 0.42, iw - 12, 7);                // council table
+      x.fillStyle = 'rgba(255,255,255,.12)'; x.fillRect(ix + 6, iy + ih * 0.42, iw - 12, 1.5);
+      const seats = Math.min(5, ((iw - 12) / 12) | 0);
+      for (let i = 0; i < seats; i++) { _vChair(x, ix + 11 + i * 12, iy + ih * 0.42 - 4); _vChair(x, ix + 11 + i * 12, iy + ih * 0.42 + 11); }
+      x.fillStyle = '#6b4a2c'; x.fillRect(ix + 3, iy + ih - 8, 10, 6);                        // ballot box
+      x.fillStyle = 'rgba(0,0,0,.4)'; x.fillRect(ix + 6, iy + ih - 7, 4, 1);
+      x.fillStyle = '#efe6d2'; x.fillRect(ix + iw - 14, iy + ih - 9, 11, 7);                  // notice board
+      x.fillStyle = '#c2a44e'; x.fillRect(ix + iw - 13, iy + ih - 8, 4, 2); x.fillStyle = '#5f97c4'; x.fillRect(ix + iw - 8, iy + ih - 8, 4, 3);
+    },
+    // ── 👔 BOSS'S OFFICE — executive suite: big desk, safe, portrait, meeting nook ──
+    exec(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(120,80,70,.14)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = _hex(b.color, .16); x.beginPath(); x.roundRect(ix + iw * 0.2, iy + ih * 0.28, iw * 0.6, ih * 0.4, 3); x.fill();  // office rug
+      x.fillStyle = '#3a2a1a'; x.fillRect(ix + iw / 2 - 12, iy + 8, 24, 8);                   // mahogany desk
+      x.fillStyle = '#5b3a22'; x.fillRect(ix + iw / 2 - 12, iy + 8, 24, 2);
+      x.fillStyle = '#1c2530'; x.fillRect(ix + iw / 2 - 7, iy + 4, 8, 5);                     // monitor
+      x.fillStyle = '#7fd0ff'; x.fillRect(ix + iw / 2 - 6, iy + 5, 6, 3);
+      x.fillStyle = '#e8c14a'; x.fillRect(ix + iw / 2 + 6, iy + 9, 3, 2);                     // brass lamp
+      x.fillStyle = '#232838'; x.beginPath(); x.arc(ix + iw / 2, iy + 20, 4, 0, 6.283); x.fill();   // high-back chair
+      x.fillStyle = 'rgba(255,255,255,.15)'; x.beginPath(); x.arc(ix + iw / 2 - 1, iy + 19, 1.6, 0, 6.283); x.fill();
+      x.fillStyle = '#6f6a63'; x.fillRect(ix + 3, iy + 2, 9, 10);                             // the safe
+      x.fillStyle = '#39414f'; x.fillRect(ix + 4, iy + 3, 7, 8); x.fillStyle = '#e8c14a'; x.beginPath(); x.arc(ix + 7.5, iy + 7, 1.6, 0, 6.283); x.fill();
+      x.fillStyle = '#3a2a1a'; x.fillRect(ix + iw - 13, iy + 2, 10, 8);                       // founder's portrait
+      x.fillStyle = '#d9c9a8'; x.fillRect(ix + iw - 12, iy + 3, 8, 6); x.fillStyle = '#5b3a22'; x.fillRect(ix + iw - 10, iy + 4, 4, 4);
+      _vTable(x, ix + iw - 12, iy + ih - 9, 5); _vChair(x, ix + iw - 20, iy + ih - 9); _vChair(x, ix + iw - 5, iy + ih - 9);  // meeting nook
+      _vShelfRow(x, ix + 3, iy + ih - 8, iw * 0.4, ['#c2a44e', '#8a5fb0', '#4e7fc2']);        // trophy shelf
+    },
+    // ── 🔬 RESEARCH LAB — benches, flasks, fume hood, chalk wall ──
+    research(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(129,140,248,.10)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = '#39414f'; x.fillRect(ix + 3, iy + 2, 12, 10);                            // fume hood
+      x.fillStyle = 'rgba(140,220,190,.35)'; x.fillRect(ix + 4, iy + 3, 10, 6);
+      x.fillStyle = '#10141c'; x.fillRect(ix + 18, iy + 2, iw - 22, 8);                       // formula chalk wall
+      x.strokeStyle = 'rgba(140,200,255,.5)'; x.lineWidth = 0.8;
+      x.beginPath(); x.moveTo(ix + 20, iy + 6); x.lineTo(ix + 26, iy + 4); x.lineTo(ix + 31, iy + 7); x.lineTo(ix + 37, iy + 3); x.stroke();
+      for (let r2 = 0; r2 < 2; r2++) {                                                        // lab benches
+        const byy = iy + ih * 0.45 + r2 * 12;
+        x.fillStyle = '#8b8f98'; x.fillRect(ix + 4, byy, iw - 8, 6);
+        x.fillStyle = '#b9bec7'; x.fillRect(ix + 4, byy, iw - 8, 1.5);
+        const fl = ['#7fd0ff', '#8fe0a0', '#d97ac0', '#f0a860'];
+        for (let i = 0; i * 9 < iw - 16; i++) { x.fillStyle = fl[(i + r2) % 4]; x.fillRect(ix + 7 + i * 9, byy - 3, 2.5, 3.5); }
+      }
+    },
+    // ── 🔞 VIDEO STORE — GATED: boarded-up storeroom until the layered NSFW gate
+    //    is on; then a neon-washed shelf shop. Never anything explicit — it's an
+    //    ABSTRACT pixel shop either way; the gate only swaps closed/open dressing. ──
+    nsfw(x, b, ix, iy, iw, ih) {
+      if (!_nsfwOn()) {                                                                      // boarded up + dark
+        x.fillStyle = 'rgba(20,18,24,.45)'; x.fillRect(ix, iy, iw, ih);
+        x.strokeStyle = '#4a3b2a'; x.lineWidth = 3;                                          // nailed planks
+        x.beginPath(); x.moveTo(ix + 2, iy + 4); x.lineTo(ix + iw - 2, iy + ih * 0.4);
+        x.moveTo(ix + 2, iy + ih * 0.55); x.lineTo(ix + iw - 2, iy + ih - 3); x.stroke();
+        x.fillStyle = '#6b5a48'; x.fillRect(ix + 4, iy + ih - 10, 9, 8);                     // dusty crates
+        x.fillRect(ix + 15, iy + ih - 8, 7, 6);
+        x.fillStyle = 'rgba(180,180,190,.25)'; x.beginPath();                                // cobweb corner
+        x.moveTo(ix + iw - 2, iy + 2); x.lineTo(ix + iw - 10, iy + 2); x.lineTo(ix + iw - 2, iy + 10); x.closePath(); x.fill();
+        return;
+      }
+      x.fillStyle = 'rgba(120,60,110,.20)'; x.fillRect(ix, iy, iw, ih);                      // plum neon wash
+      x.fillStyle = 'rgba(240,106,168,.5)'; x.fillRect(ix + 3, iy + 2, iw - 6, 2);           // neon strip
+      _vShelfRow(x, ix + 3, iy + 7, iw - 6, ['#d97ac0', '#8a5fb0', '#c0303a']);              // tape/book racks
+      _vShelfRow(x, ix + 3, iy + 17, iw * 0.6, ['#8a5fb0', '#d97ac0']);
+      x.fillStyle = '#5d4328'; x.fillRect(ix + iw - 16, iy + ih - 9, 13, 6);                 // counter
+      x.fillStyle = '#232838'; x.fillRect(ix + iw - 13, iy + ih - 13, 6, 4);                 // register
+      x.fillStyle = '#7a2a4a'; x.fillRect(ix + 3, iy + ih - 10, 3, 8);                       // back-room curtain
+      x.fillStyle = '#9a3a5f'; x.fillRect(ix + 6, iy + ih - 10, 3, 8);
+    },
+    // ── 🏪 SHOP — counter + stocked shelves (goods tinted to the shop's colour) ──
+    shop(x, b, ix, iy, iw, ih) {
+      const cc = b.color || '#6aa6d6';
+      _vShelfRow(x, ix + 3, iy + 2, iw - 6, [_hex(cc, .95), '#d8c090', '#c07a5a']);
+      if (ih > 34) _vShelfRow(x, ix + 3, iy + 12, iw * 0.55, ['#7ac0a0', _hex(cc, .8)]);
+      x.fillStyle = '#5d4328'; x.fillRect(ix + 4, iy + ih - 9, 17, 6);                       // counter
+      x.fillStyle = 'rgba(255,255,255,.12)'; x.fillRect(ix + 4, iy + ih - 9, 17, 1.5);
+      x.fillStyle = '#232838'; x.fillRect(ix + 7, iy + ih - 13, 6, 4);                       // register
+      x.fillStyle = '#8fe0a0'; x.fillRect(ix + 8, iy + ih - 12, 4, 2);
+      _vChair(x, ix + 12, iy + ih - 1, '#4a505c');
+    },
+    // ── 📬 MAIL ROOM — pigeonhole wall + parcels + service counter ──
+    mail(x, b, ix, iy, iw, ih) {
+      x.fillStyle = '#4a3b2a'; x.fillRect(ix + 3, iy + 2, iw - 6, 12);                       // pigeonhole wall
+      for (let r2 = 0; r2 < 2; r2++) for (let i = 0; i * 7 < iw - 12; i++) {
+        x.fillStyle = (i + r2) % 3 ? '#2a2318' : '#efe6d2'; x.fillRect(ix + 5 + i * 7, iy + 3.5 + r2 * 5.5, 5, 4);
+      }
+      x.fillStyle = '#c89b55'; x.fillRect(ix + 4, iy + ih - 10, 8, 8); x.fillRect(ix + 13, iy + ih - 8, 6, 6);  // parcels
+      x.fillStyle = 'rgba(0,0,0,.35)'; x.fillRect(ix + 7, iy + ih - 10, 1, 8);
+      x.fillStyle = '#5d4328'; x.fillRect(ix + iw - 20, iy + ih - 9, 17, 6);                 // counter + scale
+      x.fillStyle = '#8a919f'; x.fillRect(ix + iw - 15, iy + ih - 12, 6, 3);
+    },
+    // ── 🖥️ HOMELAB — server racks + workbench + cable run ──
+    homelab(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(30,40,60,.25)'; x.fillRect(ix, iy, iw, ih);
+      for (let k = 0; k < Math.min(3, (iw / 16) | 0); k++) {
+        const rx = ix + 4 + k * 15;
+        x.fillStyle = '#1a2029'; x.fillRect(rx, iy + 2, 11, 15);
+        for (let i = 0; i < 5; i++) {
+          x.fillStyle = '#2c3542'; x.fillRect(rx + 1.5, iy + 3.5 + i * 2.8, 8, 2);
+          x.fillStyle = i % 2 ? '#8fe0a0' : '#f08a8a'; x.fillRect(rx + 8, iy + 4 + i * 2.8, 1.2, 1.2);
+        }
+      }
+      x.strokeStyle = '#e8c14a'; x.lineWidth = 1;                                            // cable run
+      x.beginPath(); x.moveTo(ix + 4, iy + 18); x.lineTo(ix + iw - 6, iy + 18); x.stroke();
+      x.fillStyle = '#5d4328'; x.fillRect(ix + 4, iy + ih - 9, 20, 6);                       // workbench
+      x.fillStyle = '#1c2530'; x.fillRect(ix + 8, iy + ih - 14, 9, 5); x.fillStyle = '#7fd0ff'; x.fillRect(ix + 9, iy + ih - 13, 7, 3);
+    },
+    // ── 🦪 PEARL MINE — dive pool + shell line + pearl chest ──
+    pearl(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(90,180,160,.12)'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = '#2f6a9e'; x.beginPath(); x.ellipse(ix + iw * 0.45, iy + ih * 0.5, iw * 0.32, ih * 0.3, 0, 0, 6.283); x.fill();
+      x.fillStyle = 'rgba(150,210,255,.4)'; x.beginPath(); x.ellipse(ix + iw * 0.4, iy + ih * 0.44, iw * 0.14, ih * 0.1, 0, 0, 6.283); x.fill();
+      x.fillStyle = '#8a6238'; x.fillRect(ix + iw * 0.45 - 3, iy + ih * 0.2 - 4, 14, 3);      // dive plank
+      x.fillStyle = '#efe6d2';                                                                // shells drying
+      for (let i = 0; i < 4; i++) { x.beginPath(); x.arc(ix + 6 + i * 7, iy + ih - 6, 2.2, 3.14, 6.283); x.fill(); }
+      x.fillStyle = '#6b4a2c'; x.fillRect(ix + iw - 14, iy + ih - 10, 11, 8);                 // pearl chest
+      x.fillStyle = '#e6ebf3'; x.beginPath(); x.arc(ix + iw - 8.5, iy + ih - 6, 2, 0, 6.283); x.fill();
+    },
+    // ── 🤖 AI ASSISTANT — console ring + glowing core ──
+    assistant(x, b, ix, iy, iw, ih) {
+      x.fillStyle = 'rgba(60,50,100,.20)'; x.fillRect(ix, iy, iw, ih);
+      const cx2 = ix + iw / 2, cy2 = iy + ih / 2;
+      x.fillStyle = '#232838'; x.beginPath(); x.arc(cx2, cy2, Math.min(iw, ih) * 0.24, 0, 6.283); x.fill();   // the core plinth
+      x.fillStyle = '#8a5fe0'; x.beginPath(); x.arc(cx2, cy2, Math.min(iw, ih) * 0.13, 0, 6.283); x.fill();   // glowing core
+      x.fillStyle = '#c4b5fd'; x.beginPath(); x.arc(cx2 - 1, cy2 - 1.5, Math.min(iw, ih) * 0.05, 0, 6.283); x.fill();
+      for (let i = 0; i < 4; i++) {                                                           // console desks around it
+        const a2 = i * Math.PI / 2 + 0.78, dx2 = cx2 + Math.cos(a2) * iw * 0.34, dy2 = cy2 + Math.sin(a2) * ih * 0.36;
+        x.fillStyle = '#39414f'; x.fillRect(dx2 - 5, dy2 - 3, 10, 6);
+        x.fillStyle = ['#7fd0ff', '#8fe0a0', '#f0a860', '#d97ac0'][i]; x.fillRect(dx2 - 3, dy2 - 2, 6, 3);
+      }
+    },
+  };
 
   // procedural home interior — a real two-room home: bedroom behind a partition
   // (bed/wardrobe/nightstand/rug) + living space (archetype piece, dining table),
@@ -1404,10 +2151,25 @@ window.WM = (function () {
     if (_chunks.size > DISC_MAX) for (const [k, ch] of _chunks)
       if (now - ch.seen > CHUNK_EVICT_MS) _chunks.delete(k);
   }
-  const BLD_ICON = { hq: '🏢', townhall: '🏛️', exec: '💼', library: '📚', church: '⛪',
+  const BLD_ICON = { hq: '🏢', townhall: '🏛️', exec: '👔', library: '📚', church: '⛪',
                      bar: '🍺', arcade: '🕹️', tv: '📺', cafe: '☕', park: '🌳',
-                     gas: '⛽', lounge: '🛋️', shop: '🏪', house: '🏠' };
-  function _bldIcon(b) { return BLD_ICON[b.loc] || BLD_ICON[b.kind] || '🏢'; }
+                     gas: '⛽', lounge: '🛋️', shop: '🏪', house: '🏠',
+                     school: '🎓', research: '🔬', mail: '📬', homelab: '🖥️', pearl: '🦪', assistant: '🤖' };
+  // naming-theme venue override (world-theme.js) — DISPLAY ONLY. Returns null
+  // in the default themed mode (and for non-themed venues) ⇒ today's exact
+  // labels/icons; neutral mode relabels ⛪/🍺/🔞 (Advisory Hall / Social
+  // Lounge / Private Studio). The gated 🔞 state is excluded on purpose: a
+  // CLOSED store stays '🚧 Boarded Up' in every theme (the gate is untouched).
+  function _venueTheme(b) {
+    if ((b.loc === 'nsfw' || b.kind === 'nsfw') && !_nsfwOn()) return null;
+    return (window.WTheme && WTheme.venue && WTheme.venue(b.loc || b.kind)) || null;
+  }
+  function _bldIcon(b) {
+    const v = _venueTheme(b);
+    if (v && v.icon) return v.icon;
+    if (b.loc === 'nsfw' || b.kind === 'nsfw') return _nsfwOn() ? '🔞' : '🚧';   // gated store: boarded glyph until the NSFW gate is on
+    return BLD_ICON[b.loc] || BLD_ICON[b.kind] || '🏢';
+  }
   function _plainLabel(b) { return (b.label || '').replace(/[\u{1F000}-\u{1FFFF}☀-➿️]/gu, '').trim(); }
 
   // Readable name-plate over every building so you can tell them apart at a glance:
@@ -1417,7 +2179,12 @@ window.WM = (function () {
     for (const b of buildings) {
       const em = eraEmoji(b);                         // tiny civilization-era glyph so age reads even zoomed out
       const icon = _bldIcon(b);
-      const name = b.kind === 'hq' ? 'THE COMPANY HQ' : _plainLabel(b);
+      const vt = _venueTheme(b);                      // naming-theme override (null in themed default)
+      const name = b.kind === 'hq'
+        ? ('THE COMPANY HQ' + (b.stageName ? ' · ' + String(b.stageName).toUpperCase() : ''))
+        : ((b.loc === 'nsfw' || b.kind === 'nsfw') && !_nsfwOn()) ? 'Boarded Up'   // gated: reads as a derelict shop
+        : vt ? vt.label
+        : _plainLabel(b);
       if (b.house) {                                  // houses: just a small roof glyph, no clutter
         ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
         ctx.globalAlpha = 0.5; ctx.fillText((em ? em : '') + '🏠', (b.c + b.w / 2) * TILE, b.r * TILE - 2); ctx.globalAlpha = 1;
@@ -1530,6 +2297,7 @@ window.WM = (function () {
     tileAt: (c, r) => (inb(c, r) ? grid[r][c] : -1),
     drawTerrain, drawBuildingLabels, drawWallBands, drawInterior, fit, get fitScale() { return _fitScale; }, screenToWorld, worldToTile, attachControls, detachControls,
     eraStyle, eraLevel, eraEmoji,          // civilization-era styling (consumed by world-render-buildings.js roofs)
+    setHqStage, applyHqStage, get hqStage() { return _hqStage; },   // HQ progression stages (era snapshots)
     setTerrainImage, setTerrainImageEl, exportLayoutBase,
     setFloorImage, setFloorImageEl, terrainAlive, reheal,
     // edit API

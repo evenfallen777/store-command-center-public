@@ -265,11 +265,81 @@ def list_video_models():
         except Exception:
             pass
         entry = {**m, "installed": installed, "key": key}
+        # Per-model tunables: catalog defaults ride along via {**m} (gen_defaults);
+        # add the owner's saved overrides + the effective merge for the UI.
+        entry["gen_overrides"] = video_gen_overrides(m["model_id"])
+        entry["gen_settings"] = video_gen_settings(m["model_id"])
         dl = _dl_video_jobs.get(key, {})
         if dl.get("status") in ("downloading", "done", "error", "cancelled"):
             entry["dl_status"] = dl["status"]
         result.append(entry)
     return result
+
+
+def _save_video_gen_overrides(model_id: str, overrides: dict):
+    """Persist a model's override dict into the shared video_model_settings JSON
+    (settings table). An empty dict removes the model's entry entirely."""
+    raw = get_setting(VIDEO_SETTINGS_KEY)
+    try:
+        saved = json.loads(raw) if raw else {}
+    except Exception:
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    if overrides:
+        saved[model_id] = overrides
+    else:
+        saved.pop(model_id, None)
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                 (VIDEO_SETTINGS_KEY, json.dumps(saved)))
+    conn.commit()
+    conn.close()
+
+
+@router.put("/api/video-models/{key}/gen-settings")
+def save_video_gen_settings(key: str, body: dict = Body(...)):
+    """Save the owner's per-model video-gen tuning (width/height/num_frames/steps/
+    fps/guidance/strength). Values equal to the catalog default are dropped —
+    submitting an untouched form stores nothing, and clearing every field resets
+    the model to stock behavior. Bad keys 400 instead of being silently kept."""
+    from model_catalog import VIDEO_GEN_TUNABLES, video_model_gen_defaults
+    catalogue = {_hf_model_key(m["model_id"]): m for m in RECOMMENDED_VIDEO_MODELS}
+    if key not in catalogue:
+        raise HTTPException(404, "Unknown video model")
+    model_id = catalogue[key]["model_id"]
+    defaults = video_model_gen_defaults(model_id)
+    clean = {}
+    for k, v in (body or {}).items():
+        spec = VIDEO_GEN_TUNABLES.get(k)
+        if not spec:
+            raise HTTPException(400, f"Unknown setting '{k}'")
+        if v in (None, ""):
+            continue   # blank = use the default
+        typ, lo, hi = spec
+        try:
+            val = typ(float(v)) if typ is int else typ(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{k} must be a number")
+        if not (lo <= val <= hi):
+            raise HTTPException(400, f"{k} must be between {lo} and {hi}")
+        if val != defaults.get(k):
+            clean[k] = val
+    _save_video_gen_overrides(model_id, clean)
+    return {"ok": True, "overrides": clean,
+            "effective": video_gen_settings(model_id)}
+
+
+@router.delete("/api/video-models/{key}/gen-settings")
+def reset_video_gen_settings(key: str):
+    """Reset a video model's tuning back to the catalog defaults."""
+    catalogue = {_hf_model_key(m["model_id"]): m for m in RECOMMENDED_VIDEO_MODELS}
+    if key not in catalogue:
+        raise HTTPException(404, "Unknown video model")
+    model_id = catalogue[key]["model_id"]
+    _save_video_gen_overrides(model_id, {})
+    return {"ok": True, "overrides": {},
+            "effective": video_gen_settings(model_id)}
 
 @router.post("/api/video-models/{key}/download")
 def start_video_model_download(key: str):

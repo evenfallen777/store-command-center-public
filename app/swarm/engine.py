@@ -17,8 +17,9 @@ from config import REPO_DEV
 
 from ._base import _ev, _set, _job, _config
 from .llm import _roster, load_and_pin, _turn, _extract_json, _parse_vote
-from .workspace import (_git_dev, _scoped_paths, _path_allowed, _parse_files,
-                        _read_scoped_context, _fallback_single_file, _repo_tree, _read_files)
+from .workspace import (_git_dev, _git_ws, _push_ws, _scoped_paths, _path_allowed, _parse_files,
+                        _read_scoped_context, _fallback_single_file, _repo_tree, _read_files,
+                        _job_project, _job_workdir, _prepare_workdir)
 from .systasks import propose_system_task
 
 _running: set[int] = set()
@@ -52,6 +53,7 @@ ARCHITECT_SYS = (
     "split into small, independently-buildable pieces. Return STRICT JSON with keys:\n"
     '  "enhanced_spec": a clear, detailed restatement (goal, constraints, acceptance criteria);\n'
     '  "questions": [only genuinely-blocking clarifications — usually []];\n'
+    '  "question_for_user": "" — ONLY if you are truly blocked and must stop for the human;\n'
     '  "atomic": true if this is ONE focused change to a single file/area, false if it needs several files;\n'
     '  "plan": [numbered steps]  (when atomic);\n'
     '  "subtasks": [ {"title": "...", "spec": "detailed", "scope": "file"|"folder", "paths": ["rel/path"]} ] '
@@ -64,7 +66,10 @@ CODER_SYS = (
     "<<<FILE relative/path>>>\n<full new file content>\n<<<END>>>\n\n"
     "Example:\n<<<FILE docs/note.md>>>\n# Title\n\nSome body text.\n<<<END>>>\n\n"
     "Rules: no prose, no ``` code fences, no explanation outside the blocks. Emit the "
-    "COMPLETE file content (not a diff). Keep changes minimal and within the job's scope.")
+    "COMPLETE file content (not a diff). Keep changes minimal and within the job's scope.\n"
+    "EXCEPTION — if you are genuinely BLOCKED and cannot proceed without the human "
+    '(missing credentials, contradictory requirements), output ONLY this JSON instead of '
+    'file blocks: {"question_for_user": "your specific question"}. Use it rarely.')
 
 _CODER_RETRY = ("\n\nIMPORTANT: your previous reply had no valid <<<FILE ...>>> ... <<<END>>> "
                 "blocks. Re-emit the file(s) using EXACTLY that format and nothing else.")
@@ -72,13 +77,52 @@ _CODER_RETRY = ("\n\nIMPORTANT: your previous reply had no valid <<<FILE ...>>> 
 REVIEWER_SYS = (
     "You are a REVIEWER in a local-model dev swarm reviewing ANOTHER agent's change (never "
     "your own). Judge correctness, clarity, and whether it satisfies the job. Respond in "
-    'STRICT JSON: {"vote": "approve"|"reject", "comments": "specific feedback"}.')
+    'STRICT JSON: {"vote": "approve"|"reject", "comments": "specific feedback"}. Optionally '
+    'add "question_for_user": "..." ONLY when a human decision is truly required to judge '
+    "(e.g. an intentional behavior change you cannot verify) — it pauses the job for the owner.")
 
 AUDITOR_SYS = (
     "You are an AUDITOR in a local-model dev swarm auditing ANOTHER agent's change (never "
     "your own) for SECURITY and QUALITY: injection, leaked secrets, unsafe/dangerous calls, "
     "breaking changes, missing error handling. Respond in STRICT JSON: "
-    '{"vote": "approve"|"reject", "comments": "specific risks, or \'no issues found\'"}.')
+    '{"vote": "approve"|"reject", "comments": "specific risks, or \'no issues found\'"}. '
+    'Optionally add "question_for_user": "..." ONLY when a human decision is truly required.')
+
+
+def _ask_user(jid: int, agent: str, question: str):
+    """Blocking two-way Q&A: any stage (architect/coder/reviewer) can stop and
+    ask the human. Files an open swarm_questions row, logs it on the timeline,
+    and parks the job at awaiting_input — the drive loop exits ('stop'). The
+    answer endpoint (POST /questions/{qid}/answer) resumes the job via
+    swarm.start_job once the last open question is answered."""
+    question = (question or "").strip()[:1000]
+    conn = get_conn()
+    conn.execute("INSERT INTO swarm_questions (job_id,agent,question) VALUES (?,?,?)",
+                 (jid, agent, question))
+    conn.commit(); conn.close()
+    _ev(jid, agent, "question", question)
+    _set(jid, status="awaiting_input", current_agent=None,
+         progress_msg=f"⏸ {agent} needs your answer")
+
+
+def _directives(jid: int) -> str:
+    """Unconsumed OWNER DIRECTIVES for the job (POST /jobs/{id}/direct) → one
+    prompt block, marked consumed + logged. Read at stage boundaries (architect/
+    coder/reviewer turn start), never mid-LLM-turn."""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT id,text FROM swarm_directives WHERE job_id=? AND consumed=0 "
+                            "ORDER BY id", (jid,)).fetchall()
+        if not rows:
+            conn.close(); return ""
+        conn.execute("UPDATE swarm_directives SET consumed=1 WHERE id IN (%s)"
+                     % ",".join("?" * len(rows)), [r["id"] for r in rows])
+        conn.commit(); conn.close()
+    except Exception:
+        conn.close(); return ""
+    text = "\n".join("• " + (r["text"] or "") for r in rows)
+    _ev(jid, "system", "system", "🧭 Owner directive(s) picked up by the crew:\n" + text)
+    return text
 
 
 def _spawn_subtasks(parent: dict, subtasks: list) -> list[int]:
@@ -92,10 +136,10 @@ def _spawn_subtasks(parent: dict, subtasks: list) -> list[int]:
         scope = st.get("scope") if st.get("scope") in ("file", "folder", "project") else "file"
         paths = st.get("paths") or []
         cur = conn.execute(
-            "INSERT INTO swarm_jobs (title,spec,repo,branch,autonomy,scope,paths,parent_id,status) "
-            "VALUES (?,?,?,?,?,?,?,?,'proposed')",
+            "INSERT INTO swarm_jobs (title,spec,repo,branch,autonomy,scope,paths,parent_id,project_id,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,'proposed')",
             (title, st.get("spec") or "", parent.get("repo"), parent.get("branch") or "dev",
-             parent.get("autonomy"), scope, json.dumps(paths), parent["id"]))
+             parent.get("autonomy"), scope, json.dumps(paths), parent["id"], parent.get("project_id")))
         ids.append(cur.lastrowid)
     conn.commit(); conn.close()
     return ids
@@ -115,15 +159,35 @@ def _stage_architect(job, roster, cfg):
     paths = _scoped_paths(job)
     if paths:
         user += f"\nUSER-SUGGESTED PATHS: {', '.join(paths)}"
-    tree = _repo_tree()
+    dtext = _directives(jid)
+    if dtext:
+        user += "\n\nOWNER DIRECTIVE (incorporate this):\n" + dtext
+    base = _job_workdir(job)   # project-aware: dev worktree by default, live worktree on work_branch='main'
+    tree = _repo_tree(base)
     user += "\n\nREPO STRUCTURE (scope subtasks to REAL paths from this — do NOT invent src/… paths):\n" + tree
+
+    # Ground the plan in our own knowledge (library + research + codebase graph) via the
+    # unified Knowledge tool. Best-effort: a slow/failed lookup must never block or break
+    # a coding job, so it's fully guarded and time-bounded.
+    try:
+        import httpx
+        _kr = httpx.get("http://127.0.0.1:8787/api/knowledge/search",
+                        params={"q": (job.get("title") or "")[:200], "scope": "code", "limit": 4},
+                        timeout=25).json()
+        _hits = _kr.get("results") or []
+        if _hits:
+            _kt = "\n".join(f"- [{h.get('source')}] {h.get('title')}: {(h.get('snippet') or '')[:240]}"
+                            for h in _hits[:5])
+            user += "\n\nRELEVANT KNOWLEDGE (from our library/research/graph — use if helpful):\n" + _kt
+    except Exception:
+        pass
 
     # Pass 1 — SCOUT: pick real files to read, then read them, so the plan reflects the
     # actual code. Always include a few anchor files (wiring + a representative router +
     # the frontend entry) so context is solid even if the scout picks poorly.
     _set(jid, progress_msg="Reading code for context…")
     anchors = [p for p in ("app/main.py", "app/routers/portal.py", "static/index.html")
-               if (Path(REPO_DEV) / p).is_file()]
+               if (Path(base) / p).is_file()]
     want = list(anchors)
     try:
         scout = _extract_json(_turn(roster["planner"], get_prompt('swarm_scout'),
@@ -134,7 +198,7 @@ def _stage_architect(job, roster, cfg):
                 want.append(f)
     except Exception as e:
         logger.warning("swarm scout failed: %s", e)
-    file_ctx, read = _read_files(want)
+    file_ctx, read = _read_files(want, base=base)
     _ev(jid, "architect", "system",
         ("Read for context: " + ", ".join(read)) if read else "No readable context files.",
         model=roster["planner"])
@@ -144,6 +208,11 @@ def _stage_architect(job, roster, cfg):
     # Pass 2 — ARCHITECT: enhance + decompose with the real code in mind.
     out = _turn(roster["planner"], get_prompt('swarm_architect'), user, max_tokens=2500)
     data = _extract_json(out)
+    # Blocking two-way Q&A: the architect may stop for the human at ANY autonomy level.
+    qfu = (data.get("question_for_user") or "").strip()
+    if qfu:
+        _ask_user(jid, "architect", qfu)
+        return "stop"
     enhanced = (data.get("enhanced_spec") or "").strip()
     questions = [q for q in (data.get("questions") or []) if q][:5]
     atomic = data.get("atomic", True)
@@ -268,6 +337,9 @@ def _stage_coding(job, roster, cfg, feedback=""):
     wnotes = _watcher_context(jid)
     if wnotes:
         user += f"\nWATCHER NOTES (why the previous run stopped — address this):\n{wnotes}\n"
+    dtext = _directives(jid)
+    if dtext:
+        user += f"\nOWNER DIRECTIVE (incorporate this):\n{dtext}\n"
     user += f"\nCURRENT FILE CONTENTS:\n{ctx}\n\nReturn the full updated file(s)."
     files = []
     out = ""
@@ -277,6 +349,11 @@ def _stage_coding(job, roster, cfg, feedback=""):
         files = _parse_files(out)
         if files:
             break
+        # Blocking two-way Q&A: the coder chose to stop and ask the human.
+        qfu = (_extract_json(out).get("question_for_user") or "").strip()
+        if qfu:
+            _ask_user(jid, "coder", qfu)
+            return "stop"
     if not files:
         files = _fallback_single_file(out, job)   # salvage single-file jobs
     if not files:
@@ -284,11 +361,12 @@ def _stage_coding(job, roster, cfg, feedback=""):
             model=roster["coder"])
         _set(jid, status="paused", progress_msg="Coder produced no usable change")
         return "stop"
+    base = _prepare_workdir(job)   # project + work_branch aware (default: store dev worktree)
     applied, rejected = [], []
     for path, content in files:
         if not _path_allowed(path, job):
             rejected.append(path); continue
-        fp = Path(REPO_DEV) / path.lstrip("/")
+        fp = Path(base) / path.lstrip("/")
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content)
         applied.append(path)
@@ -297,9 +375,15 @@ def _stage_coding(job, roster, cfg, feedback=""):
     if not applied:
         _set(jid, status="paused", progress_msg="All proposed edits were out of scope")
         return "stop"
-    _git_dev("add", *applied)
-    _git_dev("commit", "-m", f"swarm job #{jid}: {job['title']}")
-    _ev(jid, "coder", "diff", "Edited on dev branch: " + ", ".join(applied), model=roster["coder"])
+    _git_ws(base, "add", *applied)
+    _git_ws(base, "commit", "-m", f"swarm job #{jid}: {job['title']}")
+    _ev(jid, "coder", "diff", "Edited on the working branch: " + ", ".join(applied), model=roster["coder"])
+    # Pipeline stage 2: land the commit on the GitHub dev/work branch. Best-effort —
+    # a failed push (offline, no remote) is logged and never fails the job.
+    ok, branch, detail = _push_ws(base)
+    _ev(jid, "system", "system",
+        f"⬆️ Pushed to GitHub {branch} branch" if ok
+        else f"⚠️ push to origin/{branch} failed: {detail}")
     return "reviewing"
 
 
@@ -308,7 +392,8 @@ def _stage_reviewing(job, roster, cfg):
     reviewers = roster.get("reviewers") or [roster["reviewer"]]
     _set(jid, status="reviewing", current_agent="reviewers",
          progress_msg=f"Reviewing ({len(reviewers)} voter{'s' if len(reviewers) > 1 else ''})…")
-    rc, diff = _git_dev("show", "--stat", "--patch", "HEAD", timeout=30)
+    rc, diff = _git_ws(_job_workdir(job), "show", "--stat", "--patch", "HEAD", timeout=30)
+    dtext = _directives(job["id"])
     approvals = rejects = 0
     feedback = []
     for i, rm in enumerate(reviewers):
@@ -316,8 +401,16 @@ def _stage_reviewing(job, roster, cfg):
         is_audit = (i % 2 == 1)
         role = "auditor" if is_audit else "reviewer"
         sys_p = get_prompt('swarm_auditor') if is_audit else get_prompt('swarm_reviewer')
-        out = _turn(rm, sys_p, f"JOB: {job['title']}\n\nDIFF:\n{diff[:9000]}", max_tokens=1500)
+        user_p = f"JOB: {job['title']}\n\nDIFF:\n{diff[:9000]}"
+        if dtext:
+            user_p += f"\n\nOWNER DIRECTIVE (incorporate this):\n{dtext}"
+        out = _turn(rm, sys_p, user_p, max_tokens=1500)
         data = _extract_json(out)
+        # Blocking two-way Q&A: a reviewer may stop the run for a human decision.
+        qfu = (data.get("question_for_user") or "").strip()
+        if qfu:
+            _ask_user(jid, role, qfu)
+            return "stop"
         vote = _parse_vote(data, out)
         comments = data.get("comments") or out
         if not isinstance(comments, str):
@@ -339,11 +432,12 @@ def _stage_testing(job, roster, cfg):
     jid = job["id"]
     _set(jid, status="testing", current_agent="tester", progress_msg="Testing…")
     # syntax-check the changed files (safe, fast, no side effects)
-    rc, files = _git_dev("show", "--name-only", "--pretty=format:", "HEAD")
+    base = _job_workdir(job)
+    rc, files = _git_ws(base, "show", "--name-only", "--pretty=format:", "HEAD")
     changed = [f for f in files.splitlines() if f.strip()]
     problems = []
     for f in changed:
-        fp = Path(REPO_DEV) / f
+        fp = Path(base) / f
         if f.endswith(".py"):
             r = subprocess.run(["python3", "-m", "py_compile", str(fp)], capture_output=True, text=True)
             if r.returncode != 0:
@@ -359,9 +453,70 @@ def _stage_testing(job, roster, cfg):
     return "done_stage"
 
 
+def _auto_promote_to_main(jid: int):
+    """review_mode swarm/either: the reviewer panel's consensus approve satisfies
+    the review gate — auto-approve and run the promote-to-main step (merge +
+    push; NEVER a restart here — 'Apply main → live store' takes it live, by
+    your click or the project's opt-in auto_go_live inside promote). A
+    God-Console note is always posted so the owner SEES what the swarm approved.
+    Any failure pauses the job with the reason on the timeline."""
+    conn = get_conn()
+    conn.execute("UPDATE swarm_jobs SET decision='approved', status='approved', "
+                 "updated_at=datetime('now') WHERE id=?", (jid,))
+    conn.commit(); conn.close()
+    _ev(jid, "system", "system",
+        "🤖 Reviewer-panel consensus APPROVED (review_mode=swarm/either) — "
+        "auto-promoting to main. Not on the live store until it's applied "
+        "(⬆️ Apply main → live store, or the project's auto go-live).")
+    job = _job(jid)
+    try:
+        # Lazy import breaks the swarm↔github layering (github imports swarm at
+        # module load; by the time a job runs, routers.github is fully imported).
+        from routers.github.jobs import promote_job
+        promote_job(jid)
+    except Exception as e:
+        detail = getattr(e, "detail", None) or str(e)
+        _ev(jid, "system", "error", f"Auto-promote to main failed: {detail}")
+        _set(jid, status="paused", progress_msg="Auto-promote to main failed — see timeline")
+        return
+    try:
+        import world_ops as wo
+        wo.note(f"🤖 The reviewer swarm approved and merged “{(job or {}).get('title', f'job #{jid}')}” "
+                "to main. NOT on the live store yet — click ⬆️ Apply main → live store when you "
+                "want it running (unless the project's auto go-live already applied it).",
+                kind="need")
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Driver
 # ─────────────────────────────────────────────────────────────────────────────
+def _remember_built(jid: int, job: dict):
+    """Best-effort: record what the swarm just built into shared memory (staged — it shows
+    up in Knowledge -> Memory for the owner to promote). Never raises into the run loop."""
+    try:
+        import httpx
+        title = (job.get("title") or "").strip()
+        spec = (job.get("spec") or "").strip()
+        files = ""
+        try:
+            r = subprocess.run(["git", "-C", REPO_DEV, "show", "--name-only", "--format=", "HEAD"],
+                               capture_output=True, text=True, timeout=10)
+            fs = [ln for ln in (r.stdout or "").splitlines() if ln.strip()][:12]
+            if fs:
+                files = " Files: " + ", ".join(fs)
+        except Exception:
+            pass
+        text = (f"Dev-swarm built: {title}." + (f" {spec[:400]}" if spec else "")
+                + files + f" (job #{jid}, branch {job.get('branch') or 'dev'})")
+        httpx.post("http://127.0.0.1:8787/api/knowledge/remember",
+                   json={"text": text[:1500], "agent": "dev-swarm", "tags": "built", "confidence": 0.6},
+                   timeout=15)
+    except Exception:
+        pass
+
+
 def _drive(jid: int):
     try:
         cfg = _config()
@@ -407,17 +562,28 @@ def _drive(jid: int):
             if autonomy == "step":
                 _set(jid, progress_msg="Coded — click Run to review"); # fallthrough to review anyway for now
             rv = _stage_reviewing(_job(jid), roster, cfg)
+            if rv == "stop":
+                return   # a reviewer raised a blocking question — awaiting your answer
             if isinstance(rv, tuple) and rv[0] == "recode":
                 feedback = rv[1]; continue
             tv = _stage_testing(_job(jid), roster, cfg)
             if isinstance(tv, tuple) and tv[0] == "recode":
                 feedback = tv[1]; continue
-            # passed review + test → gate for the human
+            _remember_built(jid, _job(jid))   # record what was built into shared memory (staged)
+            # passed review + test → the review gate. Who satisfies it depends on the
+            # project's review_mode: human (default) waits for you; swarm/either lets
+            # the reviewer-panel consensus that just passed auto-advance to MAIN.
+            # Reaching main is NOT going live — only 'Apply main → live store' does that.
+            rmode = (( _job_project(_job(jid)) or {}).get("review_mode") or "human").lower()
+            if rmode in ("swarm", "either"):
+                _auto_promote_to_main(jid)
+                return
             _set(jid, status="awaiting_review", current_agent=None,
                  progress=100, progress_msg="Ready for your review + approval")
             _ev(jid, "system", "system",
-                "Change is on the dev branch and passed review + syntax tests. "
-                "Approve to promote (dev→master→retail) or reject with a comment.")
+                "Change is committed on the working branch and passed review + syntax tests. "
+                "Human approval is still required before it lands on the live branch — "
+                "Approve to promote (dev→master for the store) or reject with a comment.")
             return
         _set(jid, status="paused", progress_msg=f"Paused after {MAX_CODE_ROUNDS} rounds — needs your input")
         _ev(jid, "system", "system", f"Stopped after {MAX_CODE_ROUNDS} code/review rounds. Last feedback:\n{feedback}")

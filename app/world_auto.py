@@ -253,6 +253,46 @@ def _loop():
                                     r["added"], r["revenue_cents"] / 100)
                 except Exception:
                     logger.exception("revenue sync failed")
+            # field-manual re-validation (world_bible ops layer): flags any
+            # operational teaching whose referenced file/symbol moved, so a
+            # stale note can never mislead an agent. OWN toggle
+            # (world_bible_ops_sweep, default OFF); pure disk stats, no GPU.
+            try:
+                import world_bible
+                world_bible.maybe_sweep(now)
+            except Exception:
+                logger.exception("world_bible ops sweep failed")
+            # full-catalog capability auto-loop (world_caps): its OWN toggle
+            # (world_caps_auto, default OFF) + the company master, both checked
+            # inside; independent of the creation loop's enabled() switch but
+            # still confined to active hours. At most one agent-safe capability
+            # per its interval — never publishing/spending kinds.
+            if _active_now():
+                try:
+                    import world_caps
+                    world_caps.maybe_agent_cycle(now)
+                except Exception:
+                    logger.exception("world_caps auto cycle failed")
+                # "Jesus" — the owner's toggle-gated stand-in operator
+                # (world_jesus_enabled, default OFF). One delegated action per
+                # its interval: routine prayer verdicts / already-enabled caps.
+                # The hard floor (real money, code, illegal content) stays
+                # human — see world_jesus.py.
+                try:
+                    import world_jesus
+                    world_jesus.maybe_tick(now)
+                except Exception:
+                    logger.exception("world_jesus tick failed")
+                # "Satan" — the adversarial red-team lieutenant, Jesus's mirror
+                # (world_satan_enabled, default OFF). One adversarial action per
+                # its interval: routine rejects / risk flags / already-enabled
+                # caps. NO approve path, NO money path; the illegal-content
+                # floors are always-on at the endpoints — see world_satan.py.
+                try:
+                    import world_satan
+                    world_satan.maybe_tick(now)
+                except Exception:
+                    logger.exception("world_satan tick failed")
             if enabled() and _active_now():
                 if (not _state["running"] and (now - _state["last_run"]) >= _interval_sec()
                         and _publish_backlog() < BACKLOG_MAX):

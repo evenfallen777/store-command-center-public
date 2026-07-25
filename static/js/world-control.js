@@ -17,7 +17,6 @@ const _SYS_HELP = {
   cognition: 'Agents form thoughts, opinions and ideas via the local LLM on the GPU box. Free - no real money involved.',
   meetings: 'Periodic town-hall votes where the agents decide company direction.',
   incidents: 'Injects random in-world events to keep the simulation lively. Cosmetic - no real-world effect.',
-  auto_publish: 'Sets the God Console mode. On = free publishes (example.com WordPress, Cults3D) run on their own; paid Etsy/Printify listings, PayPal payouts and code changes ALWAYS still wait for your blessing.',
   sell: 'Lets agents draft paid Etsy/Printify listings by themselves. Each one queues as a prayer in the God Console for you to approve (about 0.20 dollars per Etsy listing from the treasury).',
   swarm_cron: 'Advances cron-scheduled coding jobs in the Dev-Swarm on schedule.',
   sec_monitor: 'Watches the home network for new or changed devices.',
@@ -104,16 +103,17 @@ function _renderControl(d) {
       </div>`;
     }).join('')}`).join('');
 
-  // capabilities grouped
-  const capG = {};
-  (d.capabilities || []).forEach(c => (capG[c.group] = capG[c.group] || []).push(c));
+  // capabilities moved to their own full-catalog console tab (world-caps.js) —
+  // the old 10-button stub here was the "light" surface; every one of those
+  // triggers (plus the rest of the platform's toolkit) lives in the catalog,
+  // individually gated. controlTrigger()/the /api/world/control/trigger
+  // endpoint stay for compatibility.
   const capHtml = `
     <div style="font-weight:700;color:#e8eefc;margin:16px 0 6px">⚡ Capabilities <span style="font-size:.66rem;color:#7a86a0;font-weight:400">— trigger an action, get a product back</span></div>
-    ${Object.entries(capG).map(([g, arr]) => `
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
-        <span style="font-size:.66rem;color:#54607a;width:56px">${esc(g)}</span>
-        ${arr.map(c => `<button class="btn" style="padding:4px 10px;font-size:.74rem"${_CAP_HELP[c.id] ? ` title='${esc(_CAP_HELP[c.id])}'` : ''} onclick="controlTrigger('${c.id}')">${esc(c.label)}</button>`).join('')}
-      </div>`).join('')}`;
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;background:#0e1626;border:1px solid #26324a;border-radius:8px">
+      <div style="font-size:.72rem;color:#8a97ad">The full gated catalog — image/video/Studio/music/3D/social/listings/research and more, each returning a product — now lives in its own tab.</div>
+      <button class="btn" style="padding:5px 12px;font-size:.76rem;background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd;white-space:nowrap" onclick="worldConsole('caps')">⚡ Open the catalog</button>
+    </div>`;
 
   // selling config
   const sl = d.sell || {};

@@ -1,5 +1,73 @@
 /* Restored from pre_unification_backup (Jul 9) — real tab implementation.
    Part of the modular frontend: one file per tab. */
+
+/* ── shared media-player helpers ──
+   Used by this tab, videos-chains.js and tab-director.js (all load after the
+   core, before use — classic scripts share one global scope).
+   Fixes the studio player bugs:
+   1. audio leak: replacing innerHTML while a <video> plays leaves a detached
+      media element whose AUDIO can keep playing (Chromium keeps playing media
+      elements alive until told to stop) → stopMediaIn() pauses + unloads every
+      player before its container is re-rendered/navigated away.
+   2. dead mute/volume controls: the 2-2.5 s status polls rebuild the players,
+      wiping whatever mute/volume/position the user set → capture/restore keeps
+      PER-PLAYER (keyed by src) state across re-renders. */
+const _mediaState = {};   // src → {muted, volume, t, playing}
+
+function _mediaKey(m) {
+  return m.currentSrc || m.getAttribute('src') || (m.querySelector('source') || {}).src || '';
+}
+
+function stopMediaIn(root) {
+  if (!root) return;
+  root.querySelectorAll('video,audio').forEach(m => {
+    try {
+      m.pause();
+      m.removeAttribute('src');
+      m.querySelectorAll('source').forEach(s => s.removeAttribute('src'));
+      m.load();   // actually releases the decoder — a detached element otherwise keeps its audio alive
+    } catch {}
+  });
+}
+window.stopMediaIn = stopMediaIn;
+
+function captureMediaState(root) {
+  if (!root) return;
+  root.querySelectorAll('video,audio').forEach(m => {
+    const key = _mediaKey(m);
+    if (key) {
+      _mediaState[key] = { muted: m.muted, volume: m.volume,
+                           t: m.currentTime || 0, playing: !m.paused && !m.ended };
+    }
+  });
+  stopMediaIn(root);   // then hard-stop the old players (see audio-leak note)
+}
+
+function restoreMediaState(root) {
+  if (!root) return;
+  root.querySelectorAll('video,audio').forEach(m => {
+    const st = _mediaState[_mediaKey(m)];
+    if (!st) return;
+    const apply = () => {
+      m.muted = st.muted;
+      m.volume = st.volume;
+      try { if (st.t > 0.1) m.currentTime = st.t; } catch {}
+      if (st.playing) { const p = m.play(); if (p && p.catch) p.catch(() => {}); }
+    };
+    if (m.readyState >= 1) apply();
+    else m.addEventListener('loadedmetadata', apply, { once: true });
+  });
+}
+
+/* innerHTML swap that keeps each player's user state and never leaks audio. */
+function setHTMLKeepMedia(el, html) {
+  if (!el) return;
+  captureMediaState(el);
+  el.innerHTML = html;
+  restoreMediaState(el);
+}
+window.setHTMLKeepMedia = setHTMLKeepMedia;
+
 /* ── VIDEO GENERATION ── */
 let _videosPollTimer = null;
 
@@ -62,6 +130,17 @@ async function renderVideos() {
         </label>
       </div>
       <div id="vid-model-hint" style="margin-top:8px;font-size:.76rem;color:var(--muted)"></div>
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+        <label style="font-size:.82rem;color:var(--text);display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="vid-audio-en" style="width:auto" onchange="document.getElementById('vid-audio-settings').style.display=this.checked?'block':'none'">
+          &#128266; Generate with audio ${hlp('After the video renders, background music (and optional narration) is generated on the GPU node and mixed onto the clip automatically — same engines as the per-video “Add sound” button. Off = current behavior (silent video).')}
+        </label>
+        <div id="vid-audio-settings" style="display:none;margin-top:8px;background:var(--surface2,#16161f);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <input id="vid-audio-music" placeholder="Music vibe (optional — default: derived from the video prompt)" style="width:100%;margin-bottom:6px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box">
+          <textarea id="vid-audio-narration" placeholder="Narration to speak over it (optional — empty = music only)" rows="2" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box;resize:vertical"></textarea>
+          <div style="font-size:.68rem;color:var(--muted);margin-top:4px">Music loops under the clip; narration plays on top (MMS-TTS). Adds ~1 min after the render.</div>
+        </div>
+      </div>
       <div style="margin-top:12px;font-size:.78rem;color:var(--muted)">
         &#9432; Download additional video models in the <a href="#" onclick="navigate('models');return false;" style="color:var(--accent);">Models tab</a>. First gen with a new model downloads it automatically (~5&ndash;10&nbsp;min).
         &nbsp;&bull;&nbsp; Want a <strong>longer video (10s&ndash;30s)?</strong> Use <a href="#" onclick="showChainBuilder();return false;" style="color:#6c63ff;font-weight:600">&#128279; Chain Builder</a> to stitch multiple segments together.
@@ -82,22 +161,52 @@ async function renderVideos() {
 
 // Adjust the Quality (steps) options to what the selected model actually wants —
 // LTX likes 6–10, CogVideoX wants ~50, Wan ~20. Prevents bad output from wrong steps.
+// If the owner has tuned this model (Models tab → Video Models → ⚙ Tune defaults),
+// their saved values pre-select resolution/duration/steps; otherwise everything
+// behaves exactly as before (rec_steps preselected, static res/frames defaults).
 function onVideoModelChange() {
   const sel = document.getElementById('vid-model');
   const stepsSel = document.getElementById('vid-steps');
   const hint = document.getElementById('vid-model-hint');
   if (!sel || !stepsSel) return;
   const m = (window._videoModels || []).find(x => x.model_id === sel.value);
+  const ov = (m && m.gen_overrides) || {};   // owner's per-model tuning (may be empty)
   if (m && Array.isArray(m.steps_options) && m.steps_options.length) {
     const rec = m.rec_steps || m.steps_options[0];
-    stepsSel.innerHTML = m.steps_options.map(s => {
-      const tag = s === rec ? ' — recommended' : (s < rec ? ' — faster' : ' — sharper');
-      return `<option value="${s}"${s === rec ? ' selected' : ''}>${s}${tag}</option>`;
+    const want = ov.steps || rec;            // tuned value wins over the recommendation
+    const opts = m.steps_options.includes(want) ? m.steps_options
+               : [...m.steps_options, want].sort((a, b) => a - b);
+    stepsSel.innerHTML = opts.map(s => {
+      const tag = s === want && ov.steps ? ' — your default'
+                : s === rec ? ' — recommended' : (s < rec ? ' — faster' : ' — sharper');
+      return `<option value="${s}"${s === want ? ' selected' : ''}>${s}${tag}</option>`;
     }).join('');
+  } else if (ov.steps) {
+    _selectOrAddOption(stepsSel, String(ov.steps), `${ov.steps} — your default`);
+  }
+  if (ov.width && ov.height) {
+    _selectOrAddOption(document.getElementById('vid-res'), `${ov.width}x${ov.height}`,
+                       `${ov.width}×${ov.height} (your default)`);
+  }
+  if (ov.num_frames) {
+    _selectOrAddOption(document.getElementById('vid-frames'), String(ov.num_frames),
+                       `${ov.num_frames} frames (your default)`);
   }
   if (hint && m) {
-    hint.innerHTML = `💡 <b>${esc(m.label)}</b>: ${esc(m.style || '')}${m.vram ? ' · needs ' + esc(m.vram) + ' VRAM' : ''}${m.note ? ' · ' + esc(m.note) : ''}`;
+    const tuned = Object.keys(ov).length ? ' · ⚙ using your tuned defaults' : '';
+    hint.innerHTML = `💡 <b>${esc(m.label)}</b>: ${esc(m.style || '')}${m.vram ? ' · needs ' + esc(m.vram) + ' VRAM' : ''}${m.note ? ' · ' + esc(m.note) : ''}${tuned}`;
   }
+}
+
+// Select `value` in a <select>, appending an <option> for it when missing.
+function _selectOrAddOption(sel, value, label) {
+  if (!sel) return;
+  if (![...sel.options].some(o => o.value === value)) {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = label || value;
+    sel.appendChild(o);
+  }
+  sel.value = value;
 }
 window.onVideoModelChange = onVideoModelChange;
 
@@ -122,6 +231,20 @@ async function checkVideoNodeHealth() {
 }
 window.checkVideoNodeHealth = checkVideoNodeHealth;
 
+/* Fill an audio input/textarea with AI-suggested text — but only when the
+   owner hasn't typed anything there, so we never silently clobber their own
+   words. The fields exist (hidden) even while "Generate with audio" is off,
+   so the text is already waiting when they tick the toggle.
+   Shared with videos-chains.js (classic scripts, one global scope). */
+function _fillAudioIfEmpty(id, text) {
+  const el = document.getElementById(id);
+  if (!el || !text || !String(text).trim()) return false;
+  if (el.value.trim() !== '') return false;   // owner's text wins
+  el.value = String(text).trim();
+  return true;
+}
+window._fillAudioIfEmpty = _fillAudioIfEmpty;
+
 async function suggestVideoPrompt() {
   const topic = prompt('What should the video be about? (optional — leave blank for random)');
   if (topic === null) return; // cancelled
@@ -141,7 +264,11 @@ async function suggestVideoPrompt() {
       const pt = await pr.json();
       if (pt.status === 'done' && pt.result?.prompts?.length) {
         document.getElementById('vid-prompt').value = pt.result.prompts[0];
-        toast('Prompt generated!');
+        // Same-pass matching audio (optional keys — a prompts-only result,
+        // e.g. from the legacy parser fallback, changes nothing here).
+        const gotMusic = _fillAudioIfEmpty('vid-audio-music', pt.result.music);
+        const gotVoice = _fillAudioIfEmpty('vid-audio-narration', (pt.result.narrations || [])[0]);
+        toast(gotMusic || gotVoice ? 'Prompt + matching audio generated!' : 'Prompt generated!');
         break;
       }
       if (pt.status === 'failed') { toast('LLM failed — try again', 'error'); break; }
@@ -159,13 +286,17 @@ async function submitVideoGen() {
   const steps    = parseInt(document.getElementById('vid-steps').value);
   const modelSel = document.getElementById('vid-model');
   const model_id = modelSel ? modelSel.value : 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers';
+  const audio_enabled = !!document.getElementById('vid-audio-en')?.checked;
+  const music_prompt  = document.getElementById('vid-audio-music')?.value.trim() || '';
+  const narration     = document.getElementById('vid-audio-narration')?.value.trim() || '';
   const btn      = document.getElementById('vid-gen-btn');
   btn.disabled = true; btn.textContent = '\u23F3 Queued\u2026';
   try {
     const r = await fetch(API + '/api/videos/generate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({prompt, width: w, height: h, num_frames: frames, steps, model_id})
+      body: JSON.stringify({prompt, width: w, height: h, num_frames: frames, steps, model_id,
+                            audio_enabled, music_prompt, narration})
     });
     if (!r.ok) throw new Error(await r.text());
     toast('Video queued! Generating on RTX 3060\u2026');
@@ -190,9 +321,11 @@ async function refreshVideoGallery() {
   } catch { return; }
   const hasActive = videos.some(v => ['queued','generating'].includes(v.status) || ['queued','generating'].includes(v.audio_status));
   if (!videos.length) {
-    el.innerHTML = '<div style="text-align:center;color:var(--muted);padding:60px 20px">&#127916; No videos yet &mdash; generate your first one above!</div>';
+    setHTMLKeepMedia(el, '<div style="text-align:center;color:var(--muted);padding:60px 20px">&#127916; No videos yet &mdash; generate your first one above!</div>');
   } else {
-    el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">${videos.map(videoCard).join('')}</div>`;
+    // setHTMLKeepMedia: the 2 s poll must not kill a playing preview's audio
+    // state (mute/volume/position) or leak detached audio — see the helpers.
+    setHTMLKeepMedia(el, `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">${videos.map(videoCard).join('')}</div>`);
   }
   if (hasActive) _videosPollTimer = setTimeout(refreshVideoGallery, 2000);
 }

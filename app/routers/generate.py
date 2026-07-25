@@ -69,6 +69,61 @@ def list_generations(status: Optional[str] = None):
 class EnhanceRequest(BaseModel):
     prompt: str
 
+@router.delete("/api/generations/{gen_id}")
+def delete_generation(gen_id: int):
+    """Delete a generation — used to clear FAILED image gens from the Studio / NSFW
+    galleries (they're generations rows with no design, so the design-delete never
+    reached them). Also removes any orphaned design row + on-disk file it produced."""
+    import os
+    conn = get_conn()
+    row = conn.execute("SELECT image_path FROM generations WHERE id=?", (gen_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "generation not found")
+    for d in conn.execute("SELECT image_path FROM designs WHERE generation_id=?", (gen_id,)).fetchall():
+        try:
+            if d["image_path"] and os.path.exists(d["image_path"]):
+                os.remove(d["image_path"])
+        except Exception:
+            pass
+    conn.execute("DELETE FROM designs WHERE generation_id=?", (gen_id,))
+    if row["image_path"]:
+        try:
+            if os.path.exists(row["image_path"]):
+                os.remove(row["image_path"])
+        except Exception:
+            pass
+    conn.execute("DELETE FROM generations WHERE id=?", (gen_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@router.post("/api/generations/{gen_id}/retry")
+def retry_generation(gen_id: int, background_tasks: BackgroundTasks):
+    """Re-run a failed (or any) generation with the SAME params — clones its row into a
+    fresh generation and queues it, preserving model, source, dimensions, nsfw + category."""
+    conn = get_conn()
+    g = conn.execute("SELECT * FROM generations WHERE id=?", (gen_id,)).fetchone()
+    if not g:
+        conn.close()
+        raise HTTPException(404, "generation not found")
+    keys = g.keys()
+    cur = conn.execute(
+        "INSERT INTO generations (prompt,product_type,width,height,steps,model,source,nsfw,nsfw_category) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (g["prompt"], g["product_type"], g["width"], g["height"], g["steps"], g["model"],
+         g["source"] if "source" in keys else "pipeline",
+         g["nsfw"] if "nsfw" in keys else 0,
+         g["nsfw_category"] if "nsfw_category" in keys else None)
+    )
+    new_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(run_generation, new_id)
+    return {"ok": True, "id": new_id}
+
+
 @router.post("/api/enhance-prompt")
 def enhance_prompt(req: EnhanceRequest):
     """Queue an LLM enhance task. Returns {task_id} for polling."""

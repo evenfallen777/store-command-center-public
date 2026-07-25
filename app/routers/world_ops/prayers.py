@@ -27,6 +27,19 @@ def ops_prayers(status: str = "", limit: int = 50):
             # split creations (art/products the agents MAKE → judge/like) from operations
             d["group"] = "creation" if d.get("kind") in wo.CREATION_KINDS else "operation"
             d["thumb"] = _prayer_thumb(conn, d.get("payload")) if d["group"] == "creation" else None
+            # DUALITY (presentational only, gate unchanged): on PENDING prayers,
+            # when a lieutenant is on/shadowing, attach ✝️ Jesus's case FOR and
+            # 😈 Satan's case AGAINST + the taste hi-lo band, so the owner sees
+            # both sides BEFORE approving. Empty {} (and omitted) while both
+            # lieutenants are off — the default — and never an error.
+            if d.get("status") == "pending":
+                try:
+                    import world_duality
+                    dual = world_duality.prayer_arguments(conn, d)
+                    if dual:
+                        d["duality"] = dual
+                except Exception:
+                    pass
             out.append(d)
         return {"prayers": out}
     finally:

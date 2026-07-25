@@ -31,6 +31,102 @@ def _video_timeout(model_id: str) -> int:
     return base or _VIDEO_TIMEOUTS.get(model_id or "", 1800)
 
 
+# ── Video model VRAM preflight ───────────────────────────────────────────────
+# Mirror of the 3D gate (services_3d.check_3d_vram_or_raise): the heavy video
+# models (Wan2.1-14B ~20 GB, CogVideoX-5b ~16 GB, Hunyuan ~24 GB) can never fit
+# the node's 12 GB card — without this gate, picking one launches a job that
+# downloads tens of GB and then dies in a cryptic CUDA OOM deep in the pipeline.
+# Fail fast at request time instead, with a clear message.
+
+def _video_model_vram(model_id: str):
+    """(min_vram_mb, label) for a catalog video model, or (None, model_id) when the
+    model is unknown / has no declared floor — unknown models are never blocked."""
+    try:
+        from model_catalog import RECOMMENDED_VIDEO_MODELS
+        for m in RECOMMENDED_VIDEO_MODELS:
+            if m.get("model_id") == model_id:
+                return m.get("min_vram_mb"), m.get("label", model_id)
+    except Exception:
+        pass
+    return None, model_id
+
+
+def check_video_vram_or_raise(model_id: str) -> None:
+    """Preflight for the video generate/chain paths: if `model_id`'s min_vram_mb
+    exceeds the node's GPU capacity, raise a clear HTTPException instead of letting
+    the job launch into a multi-GB download followed by a mid-pipeline CUDA OOM.
+    Unknown capacity (node unreachable / nvidia-smi missing) is NOT a reason to
+    block — we only refuse when we POSITIVELY know it won't fit. Never raises
+    anything other than the intended HTTPException."""
+    need, label = _video_model_vram(model_id or "")
+    if not need:
+        return
+    try:
+        from services_3d import gpu_capacity_mb
+        cap = gpu_capacity_mb()
+    except Exception:
+        cap = None
+    if cap is not None and cap < need:
+        raise HTTPException(
+            400,
+            f"{label} needs ~{need // 1000} GB VRAM; the GPU node has "
+            f"~{cap // 1000} GB — pick a smaller model (Wan2.1 1.3B fits)."
+        )
+
+
+# ── Per-model video-gen settings (catalog defaults + owner overrides) ────────
+# The catalog's gen_defaults block (model_catalog.RECOMMENDED_VIDEO_MODELS) holds
+# each model's tunable params at exactly the values used before tuning existed;
+# the owner's saved overrides live in the settings table under this key as JSON
+# {model_id: {param: value}}. video_gen_settings() is the ONE merge point — the
+# request routers resolve omitted fields through it, and the run paths resolve
+# `guidance` through it at launch time.
+VIDEO_SETTINGS_KEY = "video_model_settings"
+
+
+def video_gen_overrides(model_id: str) -> dict:
+    """The owner's saved per-model overrides — validated against
+    model_catalog.VIDEO_GEN_TUNABLES (unknown keys dropped, values clamped),
+    {} when none/invalid. Never raises."""
+    try:
+        from model_catalog import VIDEO_GEN_TUNABLES
+        raw = get_setting(VIDEO_SETTINGS_KEY)
+        saved = json.loads(raw) if raw else {}
+        out = {}
+        for k, v in (saved.get(model_id) or {}).items():
+            spec = VIDEO_GEN_TUNABLES.get(k)
+            if not spec:
+                continue
+            typ, lo, hi = spec
+            try:
+                out[k] = min(max(typ(v), lo), hi)
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def video_gen_settings(model_id: str) -> dict:
+    """Effective per-model video-gen params: catalog gen_defaults overlaid with
+    the owner's overrides. With no overrides saved this returns exactly the
+    pre-tuning values, so an untouched install behaves identically."""
+    from model_catalog import video_model_gen_defaults
+    s = video_model_gen_defaults(model_id or "")
+    s.update(video_gen_overrides(model_id or ""))
+    return s
+
+
+def _video_guidance_args(model_id: str) -> list:
+    """Optional trailing generator arg for per-model guidance/CFG. Catalog models
+    always resolve a guidance value (default == what the node hardcodes today);
+    off-catalog models resolve none → no extra arg, exactly the old command line.
+    Older copies of generate_video*.sh simply ignore the extra positional, so
+    passing it is safe even before the scripts/node are synced."""
+    g = video_gen_settings(model_id).get("guidance")
+    return [str(g)] if g is not None else []
+
+
 def _video_preflight() -> tuple:
     """Fast checks so a doomed job fails instantly with a clear reason instead of
     burning 30 minutes. Returns (ok: bool, message: str)."""
@@ -70,7 +166,7 @@ def _parse_gen_line(line: str, state: dict, steps: int):
         if "loading previous" in low:
             return 6, "Loading previous segment…"
         if "loading" in low and "loaded" not in low:
-            return 3, "Loading model (first run downloads it)…"
+            return 3, "Loading model from cache…"
         if l.lower().startswith("[videogen] loaded") or "cpu offload" in low:
             return 8, "Model loaded — preparing GPU…"
         if "generating" in low:
@@ -243,7 +339,17 @@ def run_video_generation(vid_id: int):
         if not cur or cur["status"] not in ("queued", "generating"):
             return
 
-        orch.video_acquire()   # frees ComfyUI + LLM VRAM; T5-XXL text encoder alone needs ~9.5 GB
+        try:
+            # frees ComfyUI + LLM VRAM and VERIFIES it via nvidia-smi;
+            # T5-XXL text encoder alone needs ~9.5 GB. model_id lets the unified
+            # queue batch same-model video work and drain resident-LLM work first.
+            orch.video_acquire(model=model_id, desc=f"Video {vid_id}")
+        except RuntimeError as ex:
+            # GPU could not be freed (offender named in the message) — fail fast
+            # and clearly. A failed acquire holds nothing: no video_release().
+            logger.error("Video %d GPU acquire failed: %s", vid_id, ex)
+            _fail_video(vid_id, str(ex))
+            return
         conn = get_conn()
         conn.execute("UPDATE videos SET status='generating',error=NULL,progress=1,progress_msg='Starting…',updated_at=datetime('now') WHERE id=?", (vid_id,))
         conn.commit()
@@ -255,7 +361,8 @@ def run_video_generation(vid_id: int):
                 [str(VIDEO_GEN_SCRIPT), row["prompt"], str(out_path),
                  str(row["width"] or 832), str(row["height"] or 480),
                  str(row["num_frames"] or 49), str(row["steps"] or 20),
-                 str(seed), str(row["fps"] or 16), model_id],
+                 str(seed), str(row["fps"] or 16), model_id]
+                + _video_guidance_args(model_id),
                 timeout=_video_timeout(model_id), vid_id=vid_id,
                 on_progress=lambda p, m: _set_video_progress(vid_id, p, m),
                 steps=int(row["steps"] or 20),

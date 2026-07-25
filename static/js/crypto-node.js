@@ -84,6 +84,8 @@ async function cryptoLoadMining() {
   try { m = await api('/api/crypto/mining'); }
   catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
   const running = !!m.running;
+  const enabled = !!m.mining_enabled;
+  const agentAccess = !!m.agent_access;
   pane.innerHTML = `
     <div class="section-header"><div><div class="section-title">&#9935;&#65039; Mining</div>
       <div class="section-sub">Real Monero CPU mining via official xmrig ${esc(m.installed ? '(installed)' : '(NOT installed)')}. Off by default — this mines to your real XMR address.</div></div>
@@ -96,6 +98,15 @@ async function cryptoLoadMining() {
         Mines to <code style="word-break:break-all;">${esc(m.wallet || '(no XMR address yet — open Wallets)')}</code><br>
         Pool: <code>${esc(m.pool || '')}</code>
       </div>
+      <label style="display:flex;align-items:center;gap:10px;font-size:.82rem;font-weight:600;margin-bottom:8px;cursor:pointer;">
+        <input type="checkbox" id="cy-xmr-mining-enabled" ${enabled ? 'checked' : ''} onchange="cryptoToggleMining(this.checked)">
+        Allow XMR mining ${hlp('Master gate (mirrors Pearl). While OFF, the Start button is refused by the server (403). Turning it ON does not start anything — it only unlocks the Start button.')}
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:.82rem;font-weight:600;margin-bottom:12px;cursor:pointer;">
+        <input type="checkbox" id="cy-xmr-agent-access" ${agentAccess ? 'checked' : ''} onchange="cryptoToggleAgentAccess(this.checked)">
+        Allow agents to control mining ${hlp('Agent-access gate (default OFF). While OFF, only YOU (an authenticated browser session) can start/stop xmrig — the MCP tool / OpenClaw / any automation is refused with 403. Turn ON to let agents drive it (they still need the master toggle above too).')}
+        <span style="font-size:.62rem;font-weight:700;background:${agentAccess ? 'rgba(245,158,11,.16)' : 'rgba(148,163,184,.16)'};color:${agentAccess ? 'var(--warn)' : 'var(--muted)'};border-radius:10px;padding:2px 8px;text-transform:uppercase;">${agentAccess ? 'agents allowed' : 'human-only'}</span>
+      </label>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
         <div class="field" style="margin:0;flex:1;min-width:220px;">
           <label>Pool ${hlp('Monero mining pool host:port. Default MoneroOcean auto-switches to the most profitable algorithm.')}</label>
@@ -108,7 +119,7 @@ async function cryptoLoadMining() {
         <button class="btn-sm" onclick="cryptoMiningConfig()">&#128190; Save</button>
       </div>
       <div style="display:flex;gap:8px;">
-        <button class="btn-sm success" onclick="cryptoMiningAction('start')" ${running || !m.installed ? 'disabled' : ''}>&#9654; Start mining</button>
+        <button class="btn-sm success" onclick="cryptoMiningAction('start')" ${(!enabled || running || !m.installed) ? 'disabled' : ''} title="${enabled ? '' : 'Enable the toggle first'}">&#9654; Start mining</button>
         <button class="btn-sm danger" onclick="cryptoMiningAction('stop')" ${running ? '' : 'disabled'}>&#9209; Stop</button>
       </div>
     </div>
@@ -136,7 +147,31 @@ async function cryptoMiningConfig() {
 }
 window.cryptoMiningConfig = cryptoMiningConfig;
 
+async function cryptoToggleMining(on) {
+  try {
+    await api('/api/crypto/mining/config', { method: 'POST',
+      body: JSON.stringify({ mining_enabled: on ? '1' : '0' }) });
+    toast(on ? 'XMR mining UNLOCKED — nothing started; use the Start button.'
+             : 'XMR mining locked off.');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+  _cryptoLoaded.mining = false; cryptoSub('mining');
+}
+window.cryptoToggleMining = cryptoToggleMining;
+
+async function cryptoToggleAgentAccess(on) {
+  try {
+    await api('/api/crypto/mining/config', { method: 'POST',
+      body: JSON.stringify({ agent_access: on ? '1' : '0' }) });
+    toast(on ? 'Agents may now start/stop XMR mining (master toggle still required).'
+             : 'Agent access locked off — only you can control XMR mining.');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+  _cryptoLoaded.mining = false; cryptoSub('mining');
+}
+window.cryptoToggleAgentAccess = cryptoToggleAgentAccess;
+
 async function cryptoMiningAction(action) {
+  if (action === 'start' &&
+      !confirm('Start xmrig CPU mining on this box?\n\nThis competes for CPU with WordPress/the Store and earns pennies/day.')) return;
   try {
     await api(`/api/crypto/mining/${action}`, { method: 'POST' });
     toast(`xmrig ${action}`);

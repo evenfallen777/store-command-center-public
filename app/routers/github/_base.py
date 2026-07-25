@@ -29,11 +29,29 @@ def _ensure_schema():
         "ALTER TABLE swarm_jobs ADD COLUMN decision_comment TEXT",
         "ALTER TABLE swarm_jobs ADD COLUMN parent_id INTEGER",             # architect-spawned subtask → parent job
         "ALTER TABLE swarm_jobs ADD COLUMN enhanced_spec TEXT",            # architect's clarified spec
+        "ALTER TABLE swarm_jobs ADD COLUMN project_id INTEGER",            # dev_projects.id (NULL = legacy/primary store)
+        "ALTER TABLE swarm_jobs ADD COLUMN deployed_at TEXT",              # set when Apply-main→live pulls it live
+        "ALTER TABLE dev_projects ADD COLUMN review_mode TEXT DEFAULT 'human'",  # human|swarm|either at the review gate
+        "ALTER TABLE dev_projects ADD COLUMN auto_go_live INTEGER DEFAULT 0",    # auto-apply main→live after promote (store only)
     ]:
         try:
             conn.execute(mig); conn.commit()
         except Exception:
             pass
+    # dev_projects registry (created here too so this package works even if the
+    # router is imported before init_db runs — same idempotent DDL as db_schema).
+    try:
+        from db_schema import create_dev_projects_tables
+        create_dev_projects_tables(conn)
+    except Exception:
+        pass
+    conn.execute("""CREATE TABLE IF NOT EXISTS swarm_directives (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id      INTEGER NOT NULL,
+        text        TEXT NOT NULL,      -- owner directive, injected at the next stage boundary
+        consumed    INTEGER DEFAULT 0,
+        created_at  TEXT DEFAULT (datetime('now'))
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS swarm_system_tasks (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id     INTEGER,

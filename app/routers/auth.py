@@ -19,6 +19,13 @@ def _asset_ver():
 
 @router.get("/", include_in_schema=False)
 async def dashboard():
+    # FIRST-RUN WIZARD GATE: a fresh install (still on the default password, and the
+    # wizard hasn't been finished or explicitly skipped) lands here straight out of
+    # login — send it to /setup instead of the dashboard. needs_setup() is sticky-off
+    # once setup_complete=1 is written (Finish or Skip), so this never nags again.
+    from auth_core import needs_setup
+    if needs_setup():
+        return RedirectResponse(url=f"{STORE_BASE}/setup", status_code=303)
     # Serve index.html, injecting the configured base path so the app works under
     # any reverse-proxy prefix (STORE_BASE) or at root ("") — not just "/store".
     html = (BASE / "static/index.html").read_text()
@@ -34,6 +41,42 @@ async def dashboard():
     ver = _asset_ver()
     html = _re.sub(r'(/static/(?:js|css)/[\w./\-]+\.(?:js|css))(["\'])', rf'\1?v={ver}\2', html)
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
+
+@router.get("/setup", include_in_schema=False)
+async def setup_page():
+    """First-run setup wizard shell. static/js/setup-wizard.js drives the actual steps
+    (password, topology, GPU node, subsystem opt-ins, health check) over existing
+    endpoints; this route just serves the styled page.
+
+    Deliberately ALWAYS reachable — unlike the dashboard, this route does not gate on
+    needs_setup(), so a completed/skipped install can still revisit /setup on purpose,
+    and the wizard itself is never the thing standing between the owner and Settings."""
+    from auth_core import _SETUP_HTML
+    html = (_SETUP_HTML.replace("__STORE_BASE__", STORE_BASE)
+                       .replace("Store Command Center", APP_NAME))
+    return HTMLResponse(html)
+
+
+def _login_html(error_block: str) -> str:
+    """Render the sign-in page. Includes the optional pre-auth "☕ Support this
+    project" link — the same public {enabled, url} pair the Money tab reads from
+    GET /api/donate/config (routers/donate.py). Shown only when donate_enabled +
+    a Buy Me a Coffee handle are set (Settings → Integrations → Donations), and
+    it exposes nothing but that public BMC URL."""
+    donate = ""
+    try:
+        import html as _html
+        from routers.donate import donate_config
+        d = donate_config()
+        if d.get("enabled") and d.get("url"):
+            donate = (f'<a class="donate" href="{_html.escape(d["url"], quote=True)}" '
+                      'target="_blank" rel="noopener">&#9749; Support this project</a>')
+    except Exception:
+        pass   # a settings hiccup must never break the login page
+    return (_LOGIN_HTML.replace("{error_block}", error_block)
+                       .replace("{donate_block}", donate)
+                       .replace("Store Command Center", APP_NAME))
+
 
 @router.get("/login", include_in_schema=False)
 async def login_page(request: Request, error: str = ""):
@@ -74,8 +117,7 @@ async def login_page(request: Request, error: str = ""):
                       "You'll be prompted to change it right after you're in.</div>")
     except Exception:
         pass
-    html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
-    return HTMLResponse(html)
+    return HTMLResponse(_login_html(block))
 
 
 @router.get("/api/auth/status")
@@ -112,8 +154,7 @@ async def login_post(request: Request, password: str = Form(...)):
         wait_min = int((_LOGIN_WINDOW - (now - fails[0])) // 60) + 1
         logger.warning("Login lockout for %s (%d failures)", ip, len(fails))
         block = f'<div class="err">🔒 Too many failed attempts. Try again in ~{wait_min} min.</div>'
-        html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
-        return HTMLResponse(html, status_code=429)
+        return HTMLResponse(_login_html(block), status_code=429)
     if _check_password(password):
         _login_fails.pop(ip, None)
         request.session["authenticated"] = True
@@ -124,8 +165,7 @@ async def login_post(request: Request, password: str = Form(...)):
     left = _LOGIN_MAX - len(fails)
     tail = f' ({left} attempt{"s" if left != 1 else ""} left)' if left <= 3 else ''
     block = f'<div class="err">❌ Incorrect password. Try again.{tail}</div>'
-    html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
-    return HTMLResponse(html, status_code=401)
+    return HTMLResponse(_login_html(block), status_code=401)
 
 @router.get("/logout", include_in_schema=False)
 async def logout(request: Request):

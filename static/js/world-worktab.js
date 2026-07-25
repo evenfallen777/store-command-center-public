@@ -9,8 +9,8 @@ function _wpCell(agentId, wt, p) {
     style="cursor:pointer;text-align:center;background:${_WP_COLOR[p] || _WP_COLOR[0]};color:${p ? '#0b1018' : '#4a5568'};font-weight:800;border:1px solid #0b1018;width:32px;height:24px">${p || '·'}</td>`;
 }
 
-function worldWorkTab() {
-  const st = _worldState;
+async function worldWorkTab() {
+  const st = await _ensureWorldState();
   if (!st) { toast?.('World not loaded yet'); return; }
   const wts = st.work_types || [];
   const ags = (st.agents || []).filter(a => a.kind === 'worker' || a.kind === 'openclaw')

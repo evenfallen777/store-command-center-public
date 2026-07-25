@@ -31,7 +31,10 @@ async function renderAudio() {
       </div>
       <div id="aud-engine-hint" style="margin-top:8px;font-size:.75rem;color:var(--muted)"></div>
       <div id="aud-lyrics-wrap" style="display:none;margin-top:12px">
-        <div style="font-size:.8rem;color:var(--muted);margin-bottom:4px">&#127908; Lyrics <span style="font-weight:400">(optional — sung by ACE-Step; leave empty for instrumental)</span></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <div style="font-size:.8rem;color:var(--muted)">&#127908; Lyrics <span style="font-weight:400">(optional — sung by ACE-Step; leave empty for instrumental)</span></div>
+          <button type="button" class="btn-sm" id="aud-lyrics-btn" onclick="writeAudioLyrics()">&#127908; Write lyrics</button>
+        </div>
         <textarea id="aud-lyrics" rows="5" placeholder="[verse]&#10;Walking down the street on a sunny day&#10;Everything is going my way&#10;[chorus]&#10;Oh what a feeling, oh what a day"
           style="width:100%;padding:10px 12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;resize:vertical;font-family:inherit;font-size:.85rem;box-sizing:border-box"></textarea>
         <div style="font-size:.68rem;color:var(--muted);margin-top:3px">Structure with <code>[verse]</code>, <code>[chorus]</code>, <code>[bridge]</code> tags. The <b>Prompt</b> above sets the genre/voice/mood.</div>
@@ -97,8 +100,22 @@ async function enhanceAudioPrompt() {
     _audBusy);
 }
 window.enhanceAudioPrompt = enhanceAudioPrompt;
-// re-attach a pending enhance when the Audio tab (re)renders
-function resumeAudioEnhance() { enhanceResume('aud-prompt', _audBusy); }
+
+const _lyrBusy = (on) => { const b = document.getElementById('aud-lyrics-btn'); if (b) { b.disabled = on; b.innerHTML = on ? '⏳ Writing…' : '🎤 Write lyrics'; } };
+// Write ACE-Step lyrics from the song idea + the genre/mood prompt. Runs server-side
+// on the unified queue and drops the result into the lyrics box (persists across tabs).
+async function writeAudioLyrics() {
+  const style = (document.getElementById('aud-prompt')?.value || '').trim();
+  const seed  = (document.getElementById('aud-lyrics')?.value || '').trim();
+  if (!style && !seed) { toast('Describe the song in the prompt (genre/mood), or jot a theme in the lyrics box', 'warn'); return; }
+  enhanceStart('aud-lyrics',
+    async () => (await api('/api/audio/generate-lyrics', { method: 'POST', body: JSON.stringify({ prompt: seed, style }) })).task_id,
+    _lyrBusy);
+}
+window.writeAudioLyrics = writeAudioLyrics;
+
+// re-attach a pending enhance / lyrics job when the Audio tab (re)renders
+function resumeAudioEnhance() { enhanceResume('aud-prompt', _audBusy); enhanceResume('aud-lyrics', _lyrBusy); }
 
 async function submitAudio() {
   const prompt = document.getElementById('aud-prompt').value.trim();

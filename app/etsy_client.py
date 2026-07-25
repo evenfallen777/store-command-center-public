@@ -1,9 +1,49 @@
 """
 Etsy API v3 client — OAuth2 PKCE + listing management
 """
-import hashlib, base64, os, secrets, time
+import hashlib, base64, os, secrets, time, logging
 import urllib.parse
 import httpx
+
+_log = logging.getLogger("store.etsy")
+
+
+class EtsyAuthError(Exception):
+    """Etsy OAuth is stale — the token refresh was rejected (HTTP 400/401).
+    Retrying without the user re-connecting can NEVER succeed, so callers must
+    stop calling Etsy and surface a 'Reconnect Etsy' state instead of raw 400s."""
+
+
+# ── Stale-auth state (shared, in-process) ─────────────────────────────────────
+# One flag the whole app reads instead of each caller re-attempting the doomed
+# refresh and spamming the log with raw 400s. Set on the first rejected refresh
+# (logged ONCE), cleared when a refresh succeeds or the user re-runs OAuth.
+_AUTH_STATE = {"needs_reconnect": False, "reason": "", "since": 0.0}
+
+
+def mark_auth_stale(reason: str) -> None:
+    """Flip to the quiet reconnect-needed state. Logs once per stale episode."""
+    if not _AUTH_STATE["needs_reconnect"]:
+        _log.warning(
+            "Etsy auth is stale (%s) — pausing Etsy calls until reconnected "
+            "(Settings → Reconnect Etsy). This is logged once.", str(reason)[:200])
+        _AUTH_STATE["since"] = time.time()
+    _AUTH_STATE["needs_reconnect"] = True
+    _AUTH_STATE["reason"] = str(reason)[:200]
+
+
+def mark_auth_ok() -> None:
+    """Clear the reconnect-needed state (successful refresh or fresh OAuth)."""
+    _AUTH_STATE.update({"needs_reconnect": False, "reason": "", "since": 0.0})
+
+
+def auth_state() -> dict:
+    """{'needs_reconnect': bool, 'reason': str, 'since': float} — for /api/etsy/status."""
+    return dict(_AUTH_STATE)
+
+
+def auth_needs_reconnect() -> bool:
+    return bool(_AUTH_STATE["needs_reconnect"])
 
 ETSY_BASE      = "https://openapi.etsy.com/v3"
 ETSY_AUTH_URL  = "https://www.etsy.com/oauth/connect"
@@ -78,7 +118,10 @@ def exchange_code(keystring: str, code: str, code_verifier: str, client_secret: 
 
 
 def refresh_access_token(keystring: str, refresh_token: str, client_secret: str = None) -> dict:
-    """Refresh an expired access token."""
+    """Refresh an expired access token. A 400/401 from the token endpoint means the
+    refresh token itself is dead (revoked/expired) — that raises EtsyAuthError and
+    flips the shared reconnect-needed flag; retrying is pointless until the user
+    re-runs OAuth. Success clears the flag."""
     payload = {
         "grant_type":    "refresh_token",
         "client_id":     keystring,
@@ -87,7 +130,12 @@ def refresh_access_token(keystring: str, refresh_token: str, client_secret: str 
     if client_secret:
         payload["client_secret"] = client_secret
     r = httpx.post(ETSY_TOKEN_URL, data=payload, timeout=20)
+    if r.status_code in (400, 401):
+        reason = f"token refresh rejected (HTTP {r.status_code})"
+        mark_auth_stale(reason)
+        raise EtsyAuthError(f"Etsy {reason} — reconnect Etsy in Settings.")
     r.raise_for_status()
+    mark_auth_ok()
     return r.json()
 
 

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# generate_video.sh — generate video via Wan2.1-T2V-1.3B on the node (RTX 3060).
+# Usage: generate_video.sh "prompt" [output] [width] [height] [frames] [steps] [seed] [fps] [model_id] [guidance]
+# guidance (optional): CFG override; empty/omitted → the model's built-in default.
+# Outputs: path to generated MP4 on stdout.
+#
+# Example:
+#   generate_video.sh "a cat surfing on waves" /tmp/out.mp4 832 480 49 20 0 16
+
+set -euo pipefail
+
+PROMPT="${1:?usage: generate_video.sh <prompt> [output] [width] [height] [frames] [steps] [seed] [fps] [model_id]}"
+OUTPUT="${2:-/tmp/vid_$(date +%s).mp4}"
+WIDTH="${3:-832}"
+HEIGHT="${4:-480}"
+FRAMES="${5:-49}"
+STEPS="${6:-20}"
+SEED="${7:-0}"
+FPS="${8:-16}"
+MODEL_ID="${9:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}"
+GUIDANCE="${10:-}"   # optional CFG; empty → model default on the node
+BOX="${STORE_GPU_SSH_USER:-user}@${STORE_GPU_HOST:-127.0.0.1}"
+PYTHON=~/ComfyUI/venv/bin/python3
+REMOTE_SCRIPT="~/store_videogen.py"
+TIMEOUT=1800   # 30 min — first run downloads ~5GB model
+
+# Generate random seed if 0
+if [ "$SEED" = "0" ]; then
+  SEED=$(python3 -c "import random; print(random.randint(1, 2**31-1))")
+fi
+
+TMP_ARGS="/tmp/vid_args_${SEED}_$$.json"
+TMP_OUT="/tmp/vid_out_${SEED}_$(date +%s).mp4"
+
+# Build args JSON (safe, no shell injection)
+python3 - <<PYEOF > "$TMP_ARGS"
+import json, sys
+d = {
+    "prompt":    """${PROMPT}""",
+    "output":    "$TMP_OUT",
+    "width":     $WIDTH,
+    "height":    $HEIGHT,
+    "frames":    $FRAMES,
+    "steps":     $STEPS,
+    "seed":      $SEED,
+    "fps":       $FPS,
+    "model_id":  "${MODEL_ID}",
+}
+g = """${GUIDANCE}""".strip()
+if g:
+    d["guidance"] = float(g)   # omitted key = model default (old store_videogen.py ignores it)
+print(json.dumps(d))
+PYEOF
+
+# SCP args to node
+scp -q -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 \
+  "$TMP_ARGS" "${BOX}:${TMP_ARGS}"
+rm -f "$TMP_ARGS"
+
+# Run generation on node (HF_HUB_OFFLINE skips network checks; expandable_segments fixes VRAM fragmentation)
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=60 "$BOX" \
+  "HF_HOME=${STORE_HF_VIDEO:-/media/user/SSD/models_video} HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $PYTHON $REMOTE_SCRIPT $TMP_ARGS"
+
+RC=$?
+
+if [ $RC -ne 0 ]; then
+  ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$BOX" "rm -f $TMP_ARGS $TMP_OUT" 2>/dev/null || true
+  echo "ERROR: Video generation failed on node (rc=$RC)" >&2
+  exit 1
+fi
+
+# SCP result back
+mkdir -p "$(dirname "$OUTPUT")"
+scp -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=60 \
+  "${BOX}:${TMP_OUT}" "$OUTPUT"
+
+RC2=$?
+# Cleanup on node
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$BOX" "rm -f $TMP_ARGS $TMP_OUT" 2>/dev/null || true
+
+if [ $RC2 -ne 0 ]; then
+  echo "ERROR: Failed to copy video from node" >&2
+  exit 1
+fi
+
+echo "$OUTPUT"

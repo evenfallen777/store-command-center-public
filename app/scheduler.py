@@ -133,6 +133,50 @@ class SecurityScheduler:
             except Exception as e:
                 log.warning("research recheck failed: %s", e)
 
+        # ── Proposal review gate: LLM judge scores pending Etsy/Printify proposals
+        # and weeds/queues them per proposal_gate_mode. Opt-in (default off); the
+        # submit is non-blocking — the judging runs as ONE background LLM task.
+        if _setting("proposal_gate_enabled", "0") == "1" and \
+                now - self.last.get("proposalgate", 0) >= _minutes("proposal_gate_interval_min", 360, floor_min=15):
+            self.last["proposalgate"] = now
+            try:
+                import proposal_gate
+                r = proposal_gate.gate_tick()
+                if not r.get("skipped"):
+                    log.info("proposal gate: %s", r)
+            except Exception as e:
+                log.warning("proposal gate tick failed: %s", e)
+
+        # ── Mail auto-reply gate: triage new inbox mail, draft profile-driven
+        # replies, and (full_auto only, hard-guardrailed) send routine ones.
+        # Opt-in (default off + default mode 'manual'); submit is non-blocking —
+        # the batch runs as ONE background LLM task (see mail_gate.py).
+        if _setting("mail_gate_enabled", "0") == "1" and \
+                now - self.last.get("mailgate", 0) >= _minutes("mail_gate_interval_min", 15, floor_min=5):
+            self.last["mailgate"] = now
+            try:
+                import mail_gate
+                r = mail_gate.gate_tick()
+                if not r.get("skipped"):
+                    log.info("mail gate: %s", r)
+            except Exception as e:
+                log.warning("mail gate tick failed: %s", e)
+
+        # ── Proposal desk: intake side of the funnel — harvests the crew's
+        # "Suggested:" ideas into proposals, keeps the Etsy demand snapshot warm,
+        # and kicks the multi-lane feed scan. Opt-in (default off); a Company
+        # control-plane system, so the master pause stops it like everything else.
+        if _setting("proposal_desk_enabled", "0") == "1" and \
+                now - self.last.get("proposaldesk", 0) >= _minutes("proposal_desk_interval_min", 240, floor_min=15):
+            self.last["proposaldesk"] = now
+            try:
+                import proposal_desk
+                r = proposal_desk.desk_tick()
+                if not r.get("skipped"):
+                    log.info("proposal desk: %s", r)
+            except Exception as e:
+                log.warning("proposal desk tick failed: %s", e)
+
         # ── Company security audit: periodic snapshot + regression alerts ──
         # Independent of the Pi-hole monitor; gated by the control plane.
         if _setting("security_audit_enabled", "0") == "1" and \

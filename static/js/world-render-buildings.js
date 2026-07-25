@@ -12,7 +12,14 @@ const _BLD_SPRITE = { bar: 'bld_tavern', arcade: 'bld_arcade', cafe: 'bld_cafe',
                       research: 'bld_library',
                       // the four standalone dept buildings reuse existing pack sprites as a fallback
                       mail: 'bld_shop_2', homelab: 'bld_shop_1', pearl: 'bld_shop_1', assistant: 'bld_shop_2' };
+/* Iron/Steel-age restyle: these buildings now have their OWN industrial exteriors
+   (riveted flat roofs, smokestacks, brick faces — _ironRoof below), so the generic
+   Kenney cottage sprite must NOT paper over them (it was exactly the "everything
+   looks like a house" problem). Houses + the HQ keep their sprite chain; explicitly
+   generated per-building sprites (WSP building_<id> / era art) still take precedence. */
+function _ironStyled(b) { return b.kind !== 'house' && b.kind !== 'hq' && b.kind !== 'church'; }
 function _bldSprite(b) {
+  if (_ironStyled(b)) return null;                       // the new industrial exterior IS the look
   if (b.loc && _BLD_SPRITE[b.loc]) return _BLD_SPRITE[b.loc];
   if (b.kind === 'house') return (b.id % 2) ? 'bld_house_2' : 'bld_house_1';
   if (b.kind === 'shop') return (b.id % 2) ? 'bld_shop_2' : 'bld_shop_1';
@@ -114,20 +121,27 @@ function _drawDoors(ctx) {
    standing objects instead of flat outlines (the "everything looks the same
    beige box" fix). Pure overlay — the baked terrain stays untouched. */
 const _TRIM_HUES = [14, 205, 355, 95, 265, 30, 180, 320];
+function _depthRect(ctx, x, y, w, h, hue) {
+  // soft cast shadow bottom + right
+  ctx.fillStyle = 'rgba(0,0,0,.22)';
+  ctx.fillRect(x + 3, y + h, w, 4);
+  ctx.fillRect(x + w, y + 4, 4, h - 1);
+  // eaves band along the top wall, hue varied per building
+  ctx.fillStyle = `hsla(${hue},45%,42%,.85)`;
+  ctx.fillRect(x, y - 2, w, 4);
+  ctx.fillStyle = `hsla(${hue},50%,58%,.9)`;
+  ctx.fillRect(x, y - 2, w, 1.5);
+}
 function _drawBuildingDepth(ctx) {
   const TL = WM.TILE;
   for (const b of (WM.buildings || [])) {
-    const x = b.c * TL, y = b.r * TL, w = b.w * TL, h = b.h * TL;
-    // soft cast shadow bottom + right
-    ctx.fillStyle = 'rgba(0,0,0,.22)';
-    ctx.fillRect(x + 3, y + h, w, 4);
-    ctx.fillRect(x + w, y + 4, 4, h - 1);
-    // eaves band along the top wall, hue varied per building
     const hue = _TRIM_HUES[(b.id || 0) % _TRIM_HUES.length];
-    ctx.fillStyle = `hsla(${hue},45%,42%,.85)`;
-    ctx.fillRect(x, y - 2, w, 4);
-    ctx.fillStyle = `hsla(${hue},50%,58%,.9)`;
-    ctx.fillRect(x, y - 2, w, 1.5);
+    if (b.sections && b.sections.length) {           // staged compound HQ: depth per WING, not the bbox
+      for (const s of b.sections) if (!s.open)
+        _depthRect(ctx, (b.c + s.lc) * TL, (b.r + s.lr) * TL, s.w * TL, s.h * TL, 210);   // steel-blue eaves
+      continue;
+    }
+    _depthRect(ctx, b.c * TL, b.r * TL, b.w * TL, b.h * TL, hue);
   }
 }
 
@@ -141,19 +155,25 @@ const WALL_H = 8, ROOF_OV = 3;   // thinner pseudo-3D front-wall face, consisten
 const _ROOF_PAL = {
   house:    [['#a84f35', '#7f3c28', '#c06a4a'], ['#5d6a7c', '#485460', '#75859a'],
              ['#5f7d49', '#4a6338', '#77985c'], ['#8a6a42', '#6d5334', '#a5854f']],
-  shop:     [['#7a4a8a', '#5d3869', '#9a67ad'], ['#3f7fb0', '#2f6089', '#5b9cc9'], ['#b06a3f', '#8a4f2c', '#c98b5b']],
-  leisure:  [['#a0623f', '#7c4a2f', '#bd8058']],
-  church:   [['#6b5a8f', '#524370', '#8875ad']],
-  library:  [['#4c7a68', '#3a5f50', '#639a85']],
-  townhall: [['#a98a3f', '#846b2f', '#c4a557']],
-  exec:     [['#8f4545', '#6d3434', '#ad6060']],
-  research: [['#5b5f9e', '#454877', '#7d82c5']],
-  mail:     [['#a85f7e', '#824860', '#c57e9c']],
-  homelab:  [['#4a7fa8', '#38618a', '#6b9cc9']],
-  pearl:    [['#4f8a72', '#3d6957', '#6fab8f']],
-  assistant:[['#7a5fa8', '#5d488a', '#9a7ec9']],
+  // Iron/Steel-age slabs: steel/iron greys with a coloured PARAPET TRIM per venue
+  // (the trim keeps each building identifiable at a glance from above).
+  shop:     [['#5f6570', '#484e58', '#7a828e'], ['#665f58', '#4c4640', '#837a70'], ['#5a626e', '#434a55', '#77808c']],
+  leisure:  [['#635c55', '#48423c', '#7f766c']],
+  church:   [['#4a4f5c', '#383d48', '#666d7c']],                       // slate + iron for the steeple age
+  library:  [['#57544a', '#403e36', '#726e60']],
+  townhall: [['#6a6d78', '#4f525c', '#888c99']],
+  exec:     [['#5c626e', '#454a54', '#7a808c']],
+  research: [['#565b6e', '#404452', '#727890']],
+  school:   [['#5f6874', '#474e58', '#7d8894']],
+  nsfw:     [['#4a444e', '#35313a', '#5f5864']],
+  mail:     [['#665a62', '#4b4248', '#847680']],
+  homelab:  [['#4f5a68', '#3a444f', '#697786']],
+  pearl:    [['#4f6a62', '#3b504a', '#68877d']],
+  assistant:[['#5b5568', '#43404f', '#767085']],
 };
 const _FACE_PAL = ['#d9c9a8', '#cbb491', '#c2c8ce', '#d1bfae'];
+/* brick / steel front-wall faces for the industrial set */
+const _FACE_IRON = ['#9a7a5e', '#8f98a4', '#a08066', '#7e8894'];
 function _roofAlpha() {
   // Roofs cut away (fade to interiors) MUCH earlier now — you no longer have to
   // zoom almost all the way in to see inside. The fade START is tunable via the
@@ -175,9 +195,37 @@ function _drawRoofs(ctx) {
   ctx.globalAlpha = alpha;
   for (const b of (WM.buildings || [])) {
     const T = WM.TILE, bx = b.c * T, by = b.r * T, bw = b.w * T, bh = b.h * T;
-    if (b.kind === 'hq') { _flatRoof(ctx, bx, by, bw, bh, winter, nglow, (WM.eraStyle && WM.eraStyle(b)) || null); continue; }
+    if (b.kind === 'hq') {
+      const est = (WM.eraStyle && WM.eraStyle(b)) || null;
+      if (b.sections && b.sections.length) {         // Iron/Steel-Age compound: one flat roof per WING (yard stays open sky)
+        for (const s of b.sections) {
+          if (s.open) continue;
+          const sx = (b.c + s.lc) * T, sy = (b.r + s.lr) * T, sw = s.w * T, sh = s.h * T;
+          _flatRoof(ctx, sx, sy, sw, sh, winter, nglow, est);
+          if (s.key === 'utilities') {               // industrial smokestack over the boiler house
+            const cx2 = sx + sw * 0.5;
+            ctx.fillStyle = '#4d4943'; ctx.fillRect(cx2 - 3.5, sy - WALL_H - 16, 7, 16);
+            ctx.fillStyle = '#6f6a63'; ctx.fillRect(cx2 - 4.5, sy - WALL_H - 18, 9, 3);
+            for (let k = 0; k < 3; k++) {            // working smoke
+              const t = ((now / 1600) + k / 3) % 1;
+              ctx.fillStyle = `rgba(200,204,212,${(1 - t) * 0.5})`;
+              ctx.beginPath();
+              ctx.arc(cx2 + Math.sin(t * 5 + k) * 4, sy - WALL_H - 20 - t * 18, 2 + t * 3.2, 0, 6.283);
+              ctx.fill();
+            }
+          }
+        }
+        continue;
+      }
+      _flatRoof(ctx, bx, by, bw, bh, winter, nglow, est); continue;
+    }
     // CIVILIZATION ERA: age the roof + face palette (null → today's per-kind palette)
     const est = (WM.eraStyle && WM.eraStyle(b)) || null;
+    // Iron/Steel-age exteriors: every venue/shop/dept building gets an INDUSTRIAL
+    // silhouette (flat riveted roof, sawtooth skylights, stacks, brick face) that
+    // matches the HQ compound. Houses keep their gables; the church keeps its
+    // steeple (restyled to slate + iron below).
+    if (_ironStyled(b)) { _ironRoof(ctx, b, est, winter, now); continue; }
     const pal = _ROOF_PAL[b.kind] || _ROOF_PAL.house;
     const [main, dark, light] = est ? est.roof : pal[(b.id || 0) % pal.length];
     const faceTop = by + bh - WALL_H;
@@ -232,6 +280,109 @@ function _drawRoofs(ctx) {
     }
   }
   ctx.restore();
+}
+
+/* ── Iron/Steel-age exterior for the non-house town set ──────────────────────
+   One shared industrial silhouette family, differentiated per venue: a flat
+   riveted slab (matching the HQ compound's wings), SAWTOOTH north-light glass
+   on the works/shops vs a skylight grid on the civic set, a coloured parapet
+   trim in the building's identity colour, steel door with hazard jambs, brick/
+   steel front face, working smokestacks on the industry + kitchens, and per-
+   venue toppers (town-hall clock + flag, university bell tower, arcade neon
+   marquee, the bar's hanging mug sign). The gated 🔞 store reads as a boarded
+   derelict until the NSFW gate opens (then a pink neon sign — nothing else). */
+function _ironRoof(ctx, b, est, winter, now) {
+  const T = WM.TILE, bx = b.c * T, by = b.r * T, bw = b.w * T, bh = b.h * T;
+  const loc = b.loc || b.kind;
+  const pal = _ROOF_PAL[loc] || _ROOF_PAL[b.kind] || _ROOF_PAL.shop;
+  const [main, dark, light] = est ? est.roof : pal[(b.id || 0) % pal.length];
+  const faceTop = by + bh - WALL_H, ry0 = by - WALL_H;
+  const nsOpen = (loc === 'nsfw') ? (window._wmNsfwOn === true) : null;
+  // ── the slab ──
+  ctx.fillStyle = dark; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4);
+  ctx.fillStyle = main; ctx.fillRect(bx + 2, ry0 + 2, bw - 4, bh - 4);
+  const civic = loc === 'townhall' || loc === 'school' || loc === 'exec' || loc === 'library';
+  if (civic) {                                                     // skylight grid (like the HQ office wing)
+    for (let gx = 0; gx < 3; gx++) for (let gy = 0; gy < 2; gy++) {
+      const sx = bx + bw * 0.14 + gx * bw * 0.28, sy = ry0 + bh * 0.18 + gy * bh * 0.38;
+      ctx.fillStyle = 'rgba(165,210,250,.4)'; ctx.fillRect(sx, sy, bw * 0.17, bh * 0.22);
+      ctx.strokeStyle = 'rgba(20,26,38,.5)'; ctx.lineWidth = 1; ctx.strokeRect(sx, sy, bw * 0.17, bh * 0.22);
+    }
+  } else {                                                         // sawtooth monitor rows (the works)
+    const rows = Math.max(2, (bh / 22) | 0), rh = (bh - 8) / rows;
+    for (let i = 0; i < rows; i++) {
+      const sy = ry0 + 4 + i * rh;
+      ctx.fillStyle = light; ctx.fillRect(bx + 3, sy, bw - 6, rh * 0.55);
+      ctx.fillStyle = 'rgba(140,190,240,.42)'; ctx.fillRect(bx + 3, sy + rh * 0.55, bw - 6, rh * 0.3);   // north-light glass
+      ctx.fillStyle = 'rgba(0,0,0,.22)'; ctx.fillRect(bx + 3, sy + rh * 0.85, bw - 6, 1);
+    }
+  }
+  // parapet: steel edge + rivet dots + identity-colour trim band
+  ctx.strokeStyle = '#828c9d'; ctx.lineWidth = 2; ctx.strokeRect(bx - 1, ry0 - 1, bw + 2, bh + 2);
+  ctx.fillStyle = b.color || '#8fb3ff'; ctx.fillRect(bx - 1, ry0 - 1, bw + 2, 2.5);
+  ctx.fillStyle = 'rgba(232,238,244,.55)';
+  for (let px = bx + 4; px < bx + bw - 2; px += 8) { ctx.fillRect(px, ry0 + 2.5, 1.4, 1.4); ctx.fillRect(px, ry0 + bh - 4.5, 1.4, 1.4); }
+  ctx.fillStyle = '#8a919f'; ctx.fillRect(bx + bw - 15, ry0 + 4, 8, 6);          // roof vent unit
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(bx + bw - 15, ry0 + 6.5, 8, 1);
+  // ── front wall face: brick/steel with tall industrial windows + steel door ──
+  const face = est ? est.face : _FACE_IRON[(b.id || 0) % _FACE_IRON.length];
+  ctx.fillStyle = face; ctx.fillRect(bx, faceTop, bw, WALL_H);
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(bx, by + bh - 2, bw, 2);
+  const nwin = Math.max(1, Math.min(4, b.w - 3));
+  for (let i = 0; i < nwin; i++) {
+    const wx = bx + (i + 0.5) * bw / nwin - 3;
+    ctx.fillStyle = '#2c3a52'; ctx.fillRect(wx, faceTop + 3, 6, 7);
+    ctx.fillStyle = 'rgba(190,220,255,.5)'; ctx.fillRect(wx + 1, faceTop + 4, 2, 2);
+    if (nsOpen === false) {                                        // boarded windows on the gated store
+      ctx.strokeStyle = '#4a3b2a'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(wx - 1, faceTop + 3); ctx.lineTo(wx + 7, faceTop + 10);
+      ctx.moveTo(wx + 7, faceTop + 3); ctx.lineTo(wx - 1, faceTop + 10); ctx.stroke();
+    }
+  }
+  const dx = bx + bw / 2 - 4;
+  ctx.fillStyle = '#39414f'; ctx.fillRect(dx, faceTop + 3, 8, WALL_H - 4);       // steel door
+  ctx.fillStyle = '#4a505c'; ctx.fillRect(dx, faceTop + 3, 8, 2);
+  ctx.fillStyle = '#d8b13c'; ctx.fillRect(dx - 1.5, faceTop + 3, 1.5, WALL_H - 4); ctx.fillRect(dx + 8, faceTop + 3, 1.5, WALL_H - 4);
+  // ── working smokestack (industry + kitchens) ──
+  const stacky = loc === 'research' || loc === 'bar' || loc === 'cafe' || loc === 'pearl'
+              || (b.kind === 'shop' && ['Diner', 'Bakery', 'Deli'].includes(b.label));
+  if (stacky) {
+    const cx2 = bx + bw * 0.78;
+    ctx.fillStyle = '#4d4943'; ctx.fillRect(cx2 - 3, ry0 - 14, 6, 14);
+    ctx.fillStyle = '#6f6a63'; ctx.fillRect(cx2 - 4, ry0 - 16, 8, 3);
+    ctx.fillStyle = '#8a3f3f'; ctx.fillRect(cx2 - 3, ry0 - 11, 6, 2);            // banded stack
+    for (let k = 0; k < 3; k++) {
+      const t = ((now / 1500) + k / 3 + ((b.id || 0) * 0.17)) % 1;
+      ctx.fillStyle = `rgba(200,204,212,${(1 - t) * 0.45})`;
+      ctx.beginPath(); ctx.arc(cx2 + Math.sin(t * 5 + k + (b.id || 0)) * 3.5, ry0 - 18 - t * 15, 1.8 + t * 2.8, 0, 6.283); ctx.fill();
+    }
+  }
+  // ── per-venue toppers ──
+  if (loc === 'townhall') {
+    const cx2 = bx + bw / 2;
+    ctx.fillStyle = '#6a6d78'; ctx.fillRect(cx2 - 7, ry0 - 10, 14, 10);          // clock housing
+    ctx.fillStyle = '#efe6d2'; ctx.beginPath(); ctx.arc(cx2, ry0 - 5, 4, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = '#2a2f3a'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx2, ry0 - 5); ctx.lineTo(cx2, ry0 - 8); ctx.moveTo(cx2, ry0 - 5); ctx.lineTo(cx2 + 2.5, ry0 - 4); ctx.stroke();
+    ctx.strokeStyle = '#8a919f'; ctx.beginPath(); ctx.moveTo(bx + 6, ry0 - 1); ctx.lineTo(bx + 6, ry0 - 16); ctx.stroke();
+    ctx.fillStyle = '#fde047'; ctx.fillRect(bx + 6, ry0 - 16, 8, 4);             // company flag
+  } else if (loc === 'school') {
+    const cx2 = bx + bw * 0.5;
+    ctx.fillStyle = '#57544a'; ctx.fillRect(cx2 - 5, ry0 - 12, 10, 12);          // bell tower
+    ctx.fillStyle = '#6e6a5e'; ctx.beginPath(); ctx.moveTo(cx2 - 6, ry0 - 12); ctx.lineTo(cx2, ry0 - 18); ctx.lineTo(cx2 + 6, ry0 - 12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#e8c14a'; ctx.beginPath(); ctx.arc(cx2, ry0 - 8, 2.2, 0, 6.283); ctx.fill();   // the bell
+  } else if (loc === 'arcade') {
+    ctx.fillStyle = '#a26cf0'; ctx.fillRect(bx + 2, ry0 - 4, bw - 4, 3);         // neon marquee
+    ctx.fillStyle = 'rgba(162,108,240,.4)'; ctx.fillRect(bx + 2, ry0 - 6, bw - 4, 2);
+  } else if (loc === 'bar') {
+    ctx.fillStyle = '#5a3d24'; ctx.fillRect(bx + bw - 8, faceTop - 5, 1.5, 6);   // hanging sign
+    ctx.fillStyle = '#c0303a'; ctx.fillRect(bx + bw - 12, faceTop - 8, 9, 6);
+    ctx.fillStyle = '#e8c14a'; ctx.fillRect(bx + bw - 10, faceTop - 6.5, 3, 3);  // the mug
+  } else if (loc === 'nsfw' && nsOpen) {
+    ctx.fillStyle = '#f06aa8'; ctx.fillRect(bx + 3, ry0 - 4, bw - 6, 3);         // pink neon — ONLY when the gate is open
+    ctx.fillStyle = 'rgba(240,106,168,.35)'; ctx.fillRect(bx + 3, ry0 - 7, bw - 6, 2);
+  }
+  if (winter) { ctx.fillStyle = 'rgba(235,240,248,.45)'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4); }
 }
 
 /* THE COMPANY HQ gets a modern flat roof: parapet, skylight grid, AC units and a
@@ -355,8 +506,11 @@ function _drawLights(ctx, canvas) {
   const ra = _roofAlpha();
   const hq = (WM.buildings || []).find(b => b.kind === 'hq');
   if (hq && ra > 0.05) {
-    const bx = hq.c * TL, by = hq.r * TL, bw = hq.w * TL, bh = hq.h * TL;
-    for (const s of _hqSkylights(bx, by, bw, bh)) {
+    // staged compound HQ → skylights glow per WING; classic HQ → the whole slab
+    const hqRects = (hq.sections && hq.sections.length)
+      ? hq.sections.filter(s => !s.open).map(s => [(hq.c + s.lc) * TL, (hq.r + s.lr) * TL, s.w * TL, s.h * TL])
+      : [[hq.c * TL, hq.r * TL, hq.w * TL, hq.h * TL]];
+    for (const [bx, by, bw, bh] of hqRects) for (const s of _hqSkylights(bx, by, bw, bh)) {
       const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
       ctx.fillStyle = _lightGrad(ctx, cx, cy, 1, s.w, `rgba(255,205,130,${0.40 * glow * ra})`, 'rgba(255,205,130,0)');
       ctx.beginPath(); ctx.arc(cx, cy, s.w, 0, 6.283); ctx.fill();

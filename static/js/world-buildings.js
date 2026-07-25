@@ -41,18 +41,32 @@ window.WB = (function () {
     if (eL) return FRAME.L; return FRAME.R;
   }
 
-  // draw the perimeter wall ring of building b (leaving the door cell open)
-  function drawWalls(ctx, b, TILE, door) {
-    if (!ready) return false;
-    const { c, r, w, h } = b;
+  // ring one rect, skipping any cell listed in `skip` (a Set of "c,r" keys)
+  function _ring(ctx, c, r, w, h, TILE, skip) {
     for (let cc = c; cc < c + w; cc++) {
       for (let rr = r; rr < r + h; rr++) {
         const eT = rr === r, eB = rr === r + h - 1, eL = cc === c, eR = cc === c + w - 1;
         if (!(eT || eB || eL || eR)) continue;                 // interior stays open
-        if (door && cc === door.c && rr === door.r) continue;  // doorway opening
+        if (skip && skip.has(cc + ',' + rr)) continue;         // doorway opening
         _blit(ctx, _pick(eT, eB, eL, eR), cc * TILE, rr * TILE, TILE);
       }
     }
+  }
+
+  // draw the perimeter wall ring of building b (leaving the door cell open).
+  // COMPOUND buildings (b.sections: bbox-local rects + b.doors openings — the
+  // staged multi-section HQ) get one ring PER SECTION instead of a bbox ring,
+  // with every stage door left open (entrances + section-to-section links).
+  function drawWalls(ctx, b, TILE, door) {
+    if (!ready) return false;
+    if (b.sections && b.sections.length) {
+      const skip = new Set((b.doors || []).map(d => (b.c + d.lc) + ',' + (b.r + d.lr)));
+      if (door) skip.add(door.c + ',' + door.r);
+      for (const s of b.sections) if (!s.open) _ring(ctx, b.c + s.lc, b.r + s.lr, s.w, s.h, TILE, skip);
+      return true;
+    }
+    const skip = door ? new Set([door.c + ',' + door.r]) : null;
+    _ring(ctx, b.c, b.r, b.w, b.h, TILE, skip);
     return true;
   }
 

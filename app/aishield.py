@@ -245,7 +245,11 @@ def _nginx_bad_bot_snippet():
 # ═══ 4. AGENT-ACTION ANOMALY WATCH ════════════════════════════════════════════
 def _known_agents(conn):
     names = {"Mission Control", "The Republic", "Storefront", "Guardian", "Security",
-             "The People", "Scholar Vex"}
+             "The People", "Scholar Vex",
+             # God-tier lieutenants — gated stand-in operators (world_jesus.py / world_satan.py).
+             # Authorized actors, so they don't trip the "unknown actor" alert; but they are
+             # still subject to the money/code burst checks below, exactly like any agent.
+             "Jesus", "Satan"}
     try:
         names |= {r["name"] for r in conn.execute("SELECT name FROM world_agents")}
     except Exception:

@@ -29,6 +29,9 @@ SECRET_KEYS = {
     "etsy_refresh_token", "cults3d_api_key", "hf_token", "lmstudio_api_key",
     "models3d_asset_token", "wp_consumer_key", "wp_consumer_secret", "wp_mcp_token",
     "world_paypal_client_id", "world_paypal_secret", "mail_pass",
+    # Gmail OAuth client for the Mail tab's gmail-provider accounts (mail_engine.py).
+    # Per-account tokens are encrypted in mail_accounts rows, not here.
+    "gmail_client_secret",
     # money + crypto/markets tabs (2026-07-17)
     "money_signal_token", "btc_rpc_pass", "ft_api_pass",
     "rh_password", "rh_mfa_secret",
@@ -42,6 +45,23 @@ SECRET_KEYS = {
     "pearl_rpc_pass",
     # Square (Block) access token — Cash App Pay checkout links (Money tab)
     "square_access_token",
+    # Cloudflare API token — zone cache purge (Settings → Integrations). The
+    # account id isn't sensitive on its own, but it's harmless to encrypt too.
+    "cf_api_token", "cf_account_id",
+    # YouTube (Google OAuth) — social publishing (Social tab, app/social_publish/youtube.py)
+    "yt_client_id", "yt_client_secret", "yt_access_token", "yt_refresh_token",
+    # TikTok (Content Posting API OAuth) — social publishing (app/social_publish/tiktok.py)
+    "tiktok_client_key", "tiktok_client_secret", "tiktok_access_token", "tiktok_refresh_token",
+    # Meta Graph API (Instagram Reels + Facebook Page video) — social publishing
+    # (app/social_publish/instagram.py). The ids aren't strictly credentials but
+    # they identify the owner's accounts, so they're encrypted too.
+    "meta_app_id", "meta_app_secret", "meta_access_token",
+    "ig_business_id", "fb_page_id", "fb_page_token",
+    # Income Phase 2 READ-ONLY importers (app/income_import.py) — pull/record
+    # income only, never spend. PayPal here is the OWNER's account (distinct from
+    # world_paypal_* which the game-world payout rail uses); printify_api_key is
+    # the importer's own key (falls back to the shop's printify_key when unset).
+    "paypal_client_id", "paypal_client_secret", "printify_api_key",
 }
 
 

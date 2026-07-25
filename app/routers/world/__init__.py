@@ -15,6 +15,6 @@ the overlay HUD). Importing the submodules runs their
 ``@router.*`` decorators, registering every route on the single shared ``router``.
 """
 from ._base import router                       # shared router
-from . import state, agents, economy, build, sprites, hud, public   # noqa: F401  (import registers their @router routes)
+from . import state, agents, economy, build, sprites, hud, public, hq   # noqa: F401  (import registers their @router routes)
 
 __all__ = ["router"]

@@ -76,6 +76,25 @@ Return ONLY valid JSON with keys:
                      "aloud — friendly and concise, keeping their meaning. "
                      "Output your result on ONE line starting exactly with 'FINAL:' and nothing after it.",
               help="Enhances a narration line for TTS. Output must end with a single line starting 'FINAL:'."),
+    PromptDef("audio_lyrics", "Song lyrics writer (ACE-Step)", "Studio",
+              inline="You are a professional songwriter writing lyrics for the ACE-Step "
+                     "singing model. The user gives you a song idea/theme, and often a "
+                     "STYLE line describing the genre, mood and voice — write lyrics that "
+                     "fit that style.\n"
+                     "Structure the song with ACE-Step section tags on their own lines: "
+                     "[intro], [verse], [chorus], [bridge], [outro] (use [chorus] at least "
+                     "twice, repeating it word-for-word). Write a complete but singable song "
+                     "— roughly 2 verses, a repeated chorus, and an optional bridge; keep it "
+                     "under ~250 words so it fits a 2-4 minute track.\n"
+                     "Rules: original words only — no real artist, song, or brand names; "
+                     "no explicit content; keep a natural, singable rhythm and some rhyme.\n"
+                     "Output ONLY the lyrics — the section tags and the lines. No title, no "
+                     "commentary, no markdown, no code fences, no explanation.",
+              help="The 🎤 Write lyrics button on the Music/Audio tab. Turns a song idea "
+                   "(and the genre/mood prompt) into ACE-Step-formatted lyrics with "
+                   "[verse]/[chorus]/[bridge] tags. Output must be lyrics only. Assign a "
+                   "specific model to this task with the per-prompt picker if you want a "
+                   "larger-context model writing the words."),
     PromptDef("video_chain", "Video multi-scene concept", "Studio",
               ref=("deps", "CHAIN_PROMPT_SYSTEM"),
               help="Turns a concept + scene count into a JSON array of sequential text-to-video prompts."),
@@ -88,6 +107,34 @@ Return ONLY valid JSON with keys:
     PromptDef("threed_listing", "3D listing (Cults3D) copy", "Studio",
               ref=("routers.models3d", "_PROPOSE_SYSTEM"),
               help="Generates Cults3D title/description/tags/price from model facts (JSON)."),
+    PromptDef("studio_storyboard", "Director: idea → storyboard JSON", "Studio",
+              inline="""You are a video director for short AI-generated videos.
+Turn the user's idea into a complete storyboard as ONE JSON object and NOTHING else
+(no markdown, no code fences, no commentary).
+Schema: {"title","logline","style","scenes":[{"title","summary","voiceover","caption",
+"shots":[{"video_prompt","seconds","caption"}],"sfx":[{"prompt","at_shot","offset_s"}]}],
+"music":{"prompt","mood"},"caption","hashtags"}
+Rules:
+- Respect the scene count and target length in the request.
+- Each shot's video_prompt must be SELF-CONTAINED (the video model has no memory):
+  restate subject + the style thread every time. 30-60 words. Concrete visuals,
+  camera movement, lighting. No text overlays in the prompt (captions are separate).
+- Consecutive shots in a scene continue one motion/moment (they are generated as a
+  continuation chain); scene boundaries may cut to a new setting.
+- voiceover: natural spoken words, ~2.5 words per second of scene length, may be "".
+- music.prompt: genre, mood, instruments, tempo — instrumental, no artist names.
+- sfx: at most 2 per scene, each a short single sound description ending in ", no music".
+- caption/hashtags: a catchy social caption and 4-8 hashtags.""",
+              help="The Director sub-tab storyboarder: turns a dropped idea into the "
+                   "scenes/shots/script/captions/audio-plan JSON. Editable here; a "
+                   "specific model can be pinned with the per-prompt picker."),
+    PromptDef("studio_scene_regen", "Director: rewrite one scene", "Studio",
+              inline="""You are revising ONE scene of an existing storyboard. You get the
+project idea, style thread, the current scene JSON, and the owner's notes. Return ONLY
+the revised scene as one JSON object with the same schema
+{"title","summary","voiceover","caption","shots":[...],"sfx":[...]} — nothing else.
+Keep shot count/lengths unless the notes ask otherwise; keep the style thread.""",
+              help="Regenerate/steer a single scene from the Director editor."),
     # ── Private Studio (NSFW) — own category; runs on the `nsfw_model` registry
     # slot (Settings → Models). The backend safety floor in app/nsfw.py screens
     # every input AND every model-authored output regardless of these texts. ──
@@ -135,6 +182,38 @@ Return ONLY valid JSON with keys:
               inline="You are a pricing expert for print-on-demand products sold on Etsy. "
                      "Respond ONLY with valid JSON: {\"price\": <number>, \"reasoning\": \"<1-2 sentence reason>\"}",
               help="Suggests an optimal retail price as JSON {price, reasoning}."),
+    PromptDef("proposal_judge", "Proposal review judge", "Storefront",
+              ref=("proposal_gate", "JUDGE_SYSTEM"),
+              help="The proposal gate's LLM judge: scores a proposal 0-100 on marketability, "
+                   "originality, print-on-demand fit and policy safety. Must return JSON "
+                   "{score, reason} — keep that contract."),
+    # ── Proposal lanes (trend scan generators — one prompt per lane) ──
+    # Each lane runs as its own orchestrator task (task=<key>), so the per-task
+    # model picker applies per lane. All must keep the JSON-array output contract.
+    PromptDef("lane_humor", "Proposal lane: Humor", "Storefront",
+              ref=("trends", "TREND_SYSTEM"),
+              help="The classic absurdist-humor generator — now one lane among several, "
+                   "not the default frame. Keep the JSON array output contract."),
+    PromptDef("lane_news", "Proposal lane: News / topical", "Storefront",
+              ref=("trends", "LANE_NEWS_SYSTEM"),
+              help="Turns world/USA/local headlines into commemorative/zeitgeist merch. "
+                   "Keep the JSON array output contract."),
+    PromptDef("lane_tech", "Proposal lane: Tech", "Storefront",
+              ref=("trends", "LANE_TECH_SYSTEM"),
+              help="Tech news + developer/maker culture merch. Keep the JSON array output contract."),
+    PromptDef("lane_gaming", "Proposal lane: Gaming", "Storefront",
+              ref=("trends", "LANE_GAMING_SYSTEM"),
+              help="Gamer-culture merch — never real game titles/characters. "
+                   "Keep the JSON array output contract."),
+    PromptDef("lane_evergreen", "Proposal lane: Evergreen niche", "Storefront",
+              ref=("trends", "LANE_EVERGREEN_SYSTEM"),
+              help="Year-round niches (professions, hobbies, pets, milestones) — runs even "
+                   "with no trend feed. Keep the JSON array output contract."),
+    PromptDef("lane_market", "Proposal lane: Market-driven (Etsy)", "Storefront",
+              ref=("trends", "LANE_MARKET_SYSTEM"), templated=True,
+              help="Designs toward live Etsy demand. {etsy_signal} is filled with the cached "
+                   "hot-terms + own-listing-performance brief (etsy_signal.py) — keep the "
+                   "placeholder and the JSON array output contract."),
 
     # ── Resell ──
     PromptDef("resell_analyze", "Resell photo analysis", "Resell",
@@ -236,10 +315,19 @@ Return ONLY valid JSON with keys:
                    "and every price is recomputed from your recorded receipts, not from the "
                    "model. The result is an advisory draft you accept or reject; it never "
                    "changes a budget or buys anything."),
-    PromptDef("mail_quote", "Mail: carpentry quote draft", "Assistant",
-              ref=("routers.mail", "_QUOTE_SYS"),
-              help="Drafts the labor-quote email reply (fixed terms baked in). Draft only — "
-                   "nothing sends until you press Send reply."),
+    PromptDef("mail_quote", "Mail: reply / quote draft (profile-driven)", "Assistant",
+              ref=("mail_engine", "REPLY_SYSTEM"), templated=True,
+              help="Drafts the email reply/quote. A TEMPLATE: the bound business profile "
+                   "fills {business_name}/{business_description}/{terms}/{pricing_block}/"
+                   "{tone}/{signature}, and any matched FAQ / linked order fills "
+                   "{faq_block}/{order_block} — keep every placeholder. Business identity "
+                   "lives in Mail → Configuration → Business profiles, not here."),
+    PromptDef("mail_classify", "Mail: incoming triage classifier", "Assistant",
+              ref=("mail_gate", "CLASSIFY_SYSTEM"),
+              help="The auto-reply gate's triage step: classifies each incoming mail "
+                   "(quote_request / order_support / faq / spam / other), scores confidence, "
+                   "flags routine-vs-not and picks a matching FAQ. Must return JSON "
+                   "{intent, confidence, routine, faq_id, summary} — keep that contract."),
     # ── The Company (world) ──
     PromptDef("world_music_lyrics", "Company music: agent lyrics", "Studio",
               inline="You are {agent}, a musician in a small creative company, writing an original "

@@ -1,14 +1,48 @@
 'use strict';
 
-/* ══ PROPOSALS ══ */
+/* ══ PROPOSALS ══
+   Step 1 of the funnel: Proposals → Review → Approved → Published. The review
+   gate (proposal_gate.py) scores each proposal 0-100; scored cards sort best-
+   first and weeded ones collapse behind a toggle so the good ideas surface. */
+let _showWeeded = false;
 async function renderProposals() {
   const list = await api('/api/proposals?status=pending');
-  let h = `<div class="view-header"><div class="view-title">&#128161; Proposals</div><div class="view-sub">${list.length} pending</div></div>`;
-  if (!list.length) {
-    h += `<div class="empty"><div class="empty-icon">&#128161;</div>No pending proposals. Scan trends to generate more!</div>`;
+  // Gate config (for badge coloring + the status line). Defaults if the fetch fails.
+  let gs = {};
+  try { gs = await api('/api/settings'); } catch {}
+  window._propGate = {
+    enabled: gs.proposal_gate_enabled === '1',
+    mode: gs.proposal_gate_mode || 'auto_weed',
+    rejectBelow: parseInt(gs.proposal_gate_reject_below || '40', 10),
+    approveAbove: parseInt(gs.proposal_gate_approve_above || '80', 10),
+  };
+  const g = window._propGate;
+
+  list.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+  const weeded   = list.filter(p => p.verdict === 'reject');
+  const shown    = _showWeeded ? list : list.filter(p => p.verdict !== 'reject');
+  const unscored = list.filter(p => p.score == null).length;
+  const scored   = list.length - unscored;
+
+  const gateLine = g.enabled
+    ? `Gate <b style="color:var(--green);">on</b> &middot; ${esc(g.mode)} &middot; weed &lt;${g.rejectBelow}${g.mode === 'full_auto' ? ` &middot; auto-approve &ge;${g.approveAbove}` : ''}`
+    : `Gate <b style="color:var(--muted);">off</b> &mdash; enable auto-review in Etsy/Printify &rarr; Dashboard &rarr; Store Configuration`;
+
+  let h = `<div class="view-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+    <div>
+      <div class="view-title">&#128161; Proposals</div>
+      <div class="view-sub">${list.length} pending &middot; ${scored} scored${weeded.length ? ` &middot; ${weeded.length} weeded` : ''} &middot; ${gateLine}</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      ${unscored ? `<button class="btn-sm primary" data-action="review-all-proposals" id="review-all-btn">&#129514; Review all (${unscored})</button>` : ''}
+      ${weeded.length ? `<button class="btn-sm" data-action="toggle-weeded">${_showWeeded ? '&#128065; Hide' : '&#128065; Show'} weeded (${weeded.length})</button>` : ''}
+    </div>
+  </div>`;
+  if (!shown.length) {
+    h += `<div class="empty"><div class="empty-icon">&#128161;</div>${list.length ? 'All pending proposals are weeded out — toggle "Show weeded" to see them.' : 'No pending proposals. Scan trends to generate more!'}</div>`;
   } else {
     h += `<div class="proposals-grid">`;
-    for (const p of list) h += proposalCardHTML(p);
+    for (const p of shown) h += proposalCardHTML(p);
     h += `</div>`;
   }
   _setContent(h);
@@ -60,14 +94,25 @@ async function renderPublished() {
 }
 
 /* ── CARD HTML HELPERS ── */
+function _proposalScoreBadge(p) {
+  if (p.score == null)
+    return `<span class="proposal-score none" title="Not yet rated by the review gate">&#9878; unscored</span>`;
+  const g = window._propGate || { rejectBelow: 40, approveAbove: 80 };
+  const cls = p.score >= g.approveAbove ? 'good' : (p.score < g.rejectBelow ? 'bad' : 'mid');
+  const label = { approve: 'approve', hold: 'hold', reject: 'weed' }[p.verdict] || '';
+  return `<span class="proposal-score ${cls}" title="${esc(p.score_reason || '')}">&#9878; ${p.score}${label ? ' &middot; ' + label : ''}</span>`;
+}
+
 function proposalCardHTML(p) {
-  return `<div class="proposal-card" data-id="${p.id}">
+  return `<div class="proposal-card${p.verdict === 'reject' ? ' weeded' : ''}" data-id="${p.id}">
     <div class="proposal-title">${esc(p.title)}</div>
-    ${p.source ? `<span class="proposal-source">&#128204; ${esc(p.source)}</span>` : ''}
+    ${_proposalScoreBadge(p)}${p.lane ? `<span class="proposal-source" title="Proposal lane (which themed generator originated this)">&#128739;&#65039; ${esc(p.lane)}</span>` : ''}${p.source ? `<span class="proposal-source">&#128204; ${esc(p.source_label || p.source)}</span>` : ''}
+    ${p.score_reason ? `<div class="proposal-reason">${esc(p.score_reason.slice(0,120))}</div>` : ''}
     <div class="proposal-desc">${esc((p.description||'').slice(0,150))}</div>
     ${p.tags ? `<div class="proposal-tags">&#127991;&#65039; ${esc(p.tags)}</div>` : ''}
     <div class="proposal-actions">
       <button class="btn-sm primary" data-action="approve-proposal" data-id="${p.id}">&#10003; Approve</button>
+      ${p.score == null ? `<button class="btn-sm" data-action="review-proposal" data-id="${p.id}" title="Have the LLM judge rate this proposal">&#9878; Rate</button>` : ''}
       <button class="btn-sm" data-action="reject-proposal" data-id="${p.id}">&#10005; Skip</button>
     </div>
   </div>`;

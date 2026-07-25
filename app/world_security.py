@@ -79,7 +79,7 @@ SYSTEMS = {
     "audio":    {"label": "Audio Studio",  "table": "audio_clips",      "dept": "audio",    "fail": "failed"},
     "models3d": {"label": "3D Studio",     "table": "models3d",         "dept": "models3d", "fail": "error"},
     "resell":   {"label": "Resell Ops",    "table": "automation_log",   "dept": "resell",   "fail": "failed"},
-    "netsec":   {"label": "Network Sec",   "table": "security_findings", "dept": "trends",   "fail": "pending"},
+    "netsec":   {"label": "Network Sec",   "table": "security_findings", "dept": "netsec",   "fail": "pending"},
 }
 SYS_KEYS = list(SYSTEMS.keys())
 
@@ -218,6 +218,15 @@ def run_security_scan(c, verbose=True, llm_review=True):
         suspicious.append(f"{posture['attackers']} live attacker(s) probing the perimeter (see Network Security → Threats)")
     grade_note = f", posture {posture['grade']} ({posture['score']})" if posture.get("grade") else ""
     log_town(f"Security scan: {total} log issue(s), {blocked} blocked DNS queries across {len(health)} systems{grade_note}.")
+    # 😈 Satan red-team pass alongside the constructive review: a worst-case
+    # read of the same findings (world_satan.security_redteam). No-op while
+    # world_satan_enabled is OFF (the default); read-only beyond its own log
+    # lines; a failure here never blocks the scan.
+    try:
+        import world_satan
+        world_satan.security_redteam(c, suspicious, posture)
+    except Exception:
+        log.exception("satan security red-team pass failed")
     if llm_review:
         # ALWAYS run the model review on a scan — even a clean system gets an AI
         # posture read ("all nominal"), so a drill always shows a model reviewing.
@@ -234,6 +243,48 @@ def _persist_finding(c, fkey, issue, priority):
                   (fkey[:120], issue[:200], priority))
     except Exception:
         pass
+
+
+# ── NON-COMBAT remediation: the NetSec desk works its own backlog ─────────────
+# The only path that ever flipped a finding to 'remediated' was combat in a raid
+# (world_raid._defeat), and raids fire only a few times/day on UNRELATED triggers
+# — so findings piled up faster than raids could ever clear them (queue
+# starvation). LOW/MEDIUM findings don't need a raid: on the normal work cadence
+# (world_work._wg_operate, dept="netsec"), the netsec agent closes a small batch
+# of the OLDEST pending low/med findings — FIFO, same ordering fix as the raid's
+# scan_threats(). HIGH/CRITICAL findings are left for combat (they're the ones
+# that spawn as raid monsters). Throttled so the backlog drains steadily instead
+# of being wiped in one tick.
+NETSEC_REMEDIATE_BATCH = 3            # oldest low/med findings closed per non-combat pass
+NETSEC_REMEDIATE_COOLDOWN_SEC = 120   # min gap between passes (ticker runs every few sec)
+
+
+def remediate_backlog(c, agent=None, batch=NETSEC_REMEDIATE_BATCH):
+    """Close a small FIFO batch of oldest pending LOW/MEDIUM findings — no raid
+    needed. Returns the number remediated (0 if throttled or nothing to do)."""
+    now = time.time()
+    last = float(mget(c, "netsec_remediate_t", 0) or 0)
+    if last and now - last < NETSEC_REMEDIATE_COOLDOWN_SEC:
+        return 0
+    mset(c, "netsec_remediate_t", now)
+    rows = c.execute(
+        "SELECT id, issue FROM security_findings WHERE status='pending' "
+        "AND priority IN ('Low','Medium') ORDER BY id ASC LIMIT ?", (batch,)).fetchall()
+    if not rows:
+        return 0
+    name = (agent or {}).get("name") or "NetSec"
+    key = (agent or {}).get("key") or ""
+    for r in rows:
+        c.execute("UPDATE security_findings SET status='remediated', updated_at=datetime('now') WHERE id=?",
+                  (r["id"],))
+        _event(c, "security", f"🛠️ {name} patched: {(r['issue'] or 'finding')[:70]}.")
+    try:
+        import world_skills as WS
+        WS.add_xp(c, key, "knowledge", 12 * len(rows))
+    except Exception:
+        pass
+    log_town(f"NetSec: {name} closed {len(rows)} low/med finding(s) off the backlog (non-combat).")
+    return len(rows)
 
 
 def _sec_model():
@@ -253,7 +304,7 @@ def _queue_llm_review(c, suspicious):
     note is written on the CALLER's cursor `c` (same transaction — opening a second
     connection here dead-locks SQLite while the caller's write txn is open). The async
     job runs after commit, so it safely opens its own connection."""
-    from deps import get_conn, _call_lmstudio
+    from deps import get_conn, _call_lmstudio, orch
     items = "\n".join(f"- {s}" for s in suspicious[:8])
     system = "You are a SOC analyst for a small self-hosted studio. Given anomalies, reply in ONE terse sentence: the top risk + one action. If nothing is critical, say so. No preamble."
     prompt = f"Security scan results:\n{items}\n\nTop risk and recommended action (one sentence):"
@@ -263,7 +314,7 @@ def _queue_llm_review(c, suspicious):
     def _job():
         verdict, real = None, False
         try:
-            line = (_call_lmstudio(system, prompt, 60) or "").strip().split("\n")[0]
+            line = (orch.llm_borrow(lambda: _call_lmstudio(system, prompt, 60)) or "").strip().split("\n")[0]
             if line and len(line.split()) >= 4:
                 verdict, real = line[:180], True
         except Exception as ex:

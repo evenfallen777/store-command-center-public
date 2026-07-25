@@ -147,6 +147,65 @@ def world_set_work_priority(body: dict = Body(...)):
     return {"ok": True}
 
 
+# ── God-Panel WorkGiver: owner directives on depts/agents (default OFF) ──────
+def _workgiver_state(c):
+    depts = sorted({r["dept"] for r in c.execute(
+        "SELECT DISTINCT dept FROM world_agents WHERE dept IS NOT NULL").fetchall() if r["dept"]})
+    agents = [{"key": r["key"], "name": r["name"], "dept": r["dept"]} for r in c.execute(
+        "SELECT key, name, dept FROM world_agents WHERE kind IN ('worker','openclaw') "
+        "ORDER BY dept, name").fetchall()]
+    return {"enabled": world_work.workgiver_enabled(),
+            "directives": world_work.directives(c),
+            "work_types": [{"key": wt, **world_work.WT_META[wt]} for wt in world_work.WORK_TYPES],
+            "depts": depts, "agents": agents}
+
+
+@router.get("/api/world/work/givers")
+def world_workgivers():
+    """The WorkGiver control surface: master toggle + owner directives +
+    the depts/agents/work-types to aim them at. Read-only."""
+    conn = get_conn()
+    try:
+        return _workgiver_state(conn.cursor())
+    finally:
+        conn.close()
+
+
+@router.post("/api/world/work/giver")
+def world_workgiver_set(body: dict = Body(...)):
+    """Set or clear ONE owner directive: {scope:'dept'|'agent', target,
+    work_type, priority: 0-4 | null to clear, note?}. Directives only bite
+    while the master toggle is on (default OFF = unchanged behavior)."""
+    scope, target, wt = body.get("scope"), body.get("target"), body.get("work_type")
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        if body.get("priority") is None:
+            world_work.clear_directive(c, scope, target, wt)
+        elif not world_work.set_directive(c, scope, target, wt,
+                                          body["priority"], body.get("note")):
+            raise HTTPException(400, "scope must be dept|agent, work_type must be valid, target required")
+        conn.commit()
+        return _workgiver_state(c)
+    finally:
+        conn.close()
+
+
+@router.post("/api/world/work/giver-master")
+def world_workgiver_master(body: dict = Body(...)):
+    """Flip the WorkGiver master (world_workgiver_enabled). OFF (default) ⇒
+    directives are stored but inert — behavior identical to before."""
+    on = body.get("on") in (True, 1, "1", "true", "on")
+    conn = get_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                     (world_work.WORKGIVER_KEY, "1" if on else "0"))
+        conn.commit()
+        return _workgiver_state(conn.cursor())
+    finally:
+        conn.close()
+
+
 @router.get("/api/world/bills")
 def world_bills_list():
     """All production bills + live stock counts and active/paused state."""

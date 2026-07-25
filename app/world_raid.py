@@ -37,6 +37,7 @@ BOSS = {"mob": "skeleton_mage", "name": "WARLORD", "hp": 240, "size": 58, "dps":
 MAX_THREATS = 14                # cap on simultaneous on-screen enemies
 WAVE_INTERVAL_SEC = 24          # a fresh wave at most this often
 DRILL_WAVES = 3                 # a manual drill: 3 waves + a boss wave, then it ends
+NETSEC_BACKLOG_RAID_THRESHOLD = 20   # pending security_findings this deep is a raid-worthy condition on its own
 
 # ── combat v3: enemy TRAITS (behaviour derived from the mob) ──────────────────
 # healer  — orc_shaman: hangs back and heals the most-wounded fellow monster
@@ -156,8 +157,11 @@ def scan_threats(c, limit=8):
     except Exception:
         pass
     try:
+        # FIFO (oldest first): LIFO here let a steady drip of NEW findings permanently
+        # starve the backlog — a raid always grabbed the 4 newest and the oldest ones
+        # never surfaced. Oldest-first means every finding eventually gets its raid turn.
         rows = c.execute("SELECT id, issue, priority FROM security_findings "
-                         "WHERE status='pending' ORDER BY id DESC LIMIT 4").fetchall()
+                         "WHERE status='pending' ORDER BY id ASC LIMIT 4").fetchall()
         pr = {"High": 8, "Medium": 5, "Low": 3}
         for i, r in enumerate(rows):
             threats.append({"kind": "finding", "mob": SKELETON_MOBS[i % len(SKELETON_MOBS)],
@@ -677,6 +681,16 @@ def maybe_trigger(c):
             "AND created_at > datetime('now','-2 hours')").fetchone()[0] or 0)
     except Exception:
         pass
+    # The pending NetSec backlog is a trigger in its own right — findings pile up
+    # continuously (world_security._persist_finding) but raids used to only fire on
+    # UNRELATED subsystem/alert triggers, so a growing queue never got itself noticed.
+    # A deep backlog now pressures a raid on its own (still gated by the cooldown below).
+    backlog = 0
+    try:
+        backlog = int(c.execute(
+            "SELECT COUNT(*) FROM security_findings WHERE status='pending'").fetchone()[0] or 0)
+    except Exception:
+        pass
     # Keep raids OCCASIONAL. A real COOLDOWN between raids was missing — only the 5-min
     # SCAN was throttled, so routine job flakiness re-raided every ~5 min (raid→recovery→
     # peace→raid). Tunable via world_raid_min_gap_min (default 60 min).
@@ -686,12 +700,15 @@ def maybe_trigger(c):
         gap_min = 60
     last_raid = float(mget(c, "last_raid_t", 0) or 0)
     in_cooldown = bool(last_raid) and (now - last_raid) < gap_min * 60
-    # Only a genuine SPIKE or a high/critical alert becomes a raid — NOT 2-3 steady-state
-    # failed generation jobs (normal GPU contention). Sub-threshold trouble is amber "watch"
-    # (unease, no combat), which is the honest signal without a full assault every few minutes.
-    real_attack = bool(alerts) or issues >= 4
+    # Only a genuine SPIKE, a high/critical alert, or a deep NetSec backlog becomes a
+    # raid — NOT 2-3 steady-state failed generation jobs (normal GPU contention).
+    # Sub-threshold trouble is amber "watch" (unease, no combat), which is the honest
+    # signal without a full assault every few minutes.
+    backlog_spike = backlog >= NETSEC_BACKLOG_RAID_THRESHOLD
+    real_attack = bool(alerts) or issues >= 4 or backlog_spike
     if real_attack and not in_cooldown:
-        trigger_raid(c, reason="audit regression alert" if alerts else "attack detected")
+        reason = "audit regression alert" if alerts else ("attack detected" if issues >= 4 else "netsec backlog overflow")
+        trigger_raid(c, reason=reason)
     elif issues:
         WO.set_phase(c, "watch", "a subsystem is failing")
     elif ph == "watch":

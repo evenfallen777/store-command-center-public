@@ -21,6 +21,7 @@ RECOMMENDED_3D_MODELS = [
         "label": "TripoSR (fast, default)",
         "style": "Image → 3D · fast (~2 min on a 3060) · good for figurines/props",
         "vram": "~6 GB",
+        "min_vram_mb": 6000,   # machine-readable VRAM floor, for the preflight gate
         "marker": "~/TripoSR/run.py",
         "script": "~/.openclaw/tools/model3d/generate_3d.sh",
         "license": "MIT",
@@ -40,6 +41,7 @@ RECOMMENDED_3D_MODELS = [
         "label": "TripoSG ★ (MIT — sellable, higher quality)",
         "style": "Image → 3D · sharper geometry than TripoSR · commercial-safe",
         "vram": "~8–10 GB",
+        "min_vram_mb": 10000,  # machine-readable VRAM floor (upper end of the range above)
         "marker": "~/TripoSG/venv/bin/python",
         "script": "~/.openclaw/tools/model3d/generate_triposg.sh",
         "license": "MIT",
@@ -56,6 +58,7 @@ RECOMMENDED_3D_MODELS = [
         "label": "Stable Fast 3D (fast + textured)",
         "style": "Image → 3D · fast (~1 min) · textured · needs CUDA toolkit",
         "vram": "~7 GB",
+        "min_vram_mb": 7000,   # machine-readable VRAM floor, for the preflight gate
         "marker": "~/stable-fast-3d/venv/bin/python",
         "script": "~/.openclaw/tools/model3d/generate_sf3d.sh",
         "license": "Stability Community (free < $1M rev)",
@@ -72,6 +75,7 @@ RECOMMENDED_3D_MODELS = [
         "label": "TRELLIS (Microsoft) — top quality, experimental",
         "style": "Image → 3D · best open quality · heavy build · needs CUDA toolkit",
         "vram": "~16 GB (great on 2×3060/24 GB)",
+        "min_vram_mb": 16000,  # machine-readable VRAM floor — this node's 12 GB card can't run it
         "marker": "~/TRELLIS/venv/bin/python",
         "script": "~/.openclaw/tools/model3d/generate_trellis.sh",
         "license": "MIT",
@@ -283,71 +287,122 @@ def all_downloadable_models():
     return items
 
 # ── Recommended video models catalog ─────────────────────────────────────────
+# Each entry carries a `gen_defaults` block: the per-model generation params the
+# owner can tune (Models tab → Video Models → ⚙ Tune defaults, stored as
+# overrides in the `video_model_settings` settings key and merged by
+# services_media.video_gen_settings). Every value below is EXACTLY what the
+# pipeline effectively used before this block existed — width/height/frames/
+# steps/fps/strength were the request-body defaults in routers/videos.py, and
+# `guidance` mirrors the guidance_scale the node's store_videogen.py hardcodes
+# per model family — so an untuned install behaves identically.
 RECOMMENDED_VIDEO_MODELS = [
     {
         "model_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         "label": "Wan2.1 T2V 1.3B (Default)",
         "style": "General purpose text-to-video",
         "vram": "~8 GB",
+        "min_vram_mb": 8000,   # machine-readable VRAM floor, for the preflight gate
         "size": "~5.5 GB",
         "source": "HuggingFace (no auth)",
         "note": "Auto-downloads on first video gen. Recommended starting point.",
         "rec_steps": 20,
         "steps_options": [15, 20, 30],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 5.0, "strength": 0.7},
     },
     {
         "model_id": "Lightricks/LTX-Video",
         "label": "LTX-Video (Fast)",
         "style": "Fast generation, good for previews",
         "vram": "~10 GB",
+        "min_vram_mb": 10000,  # machine-readable VRAM floor, for the preflight gate
         "size": "~9 GB",
         "source": "HuggingFace (no auth)",
         "note": "Use steps=6–10 for best results. bfloat16.",
         "rec_steps": 8,
         "steps_options": [6, 8, 10, 15],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 3.0, "strength": 0.7},
     },
     {
         "model_id": "THUDM/CogVideoX-2b",
         "label": "CogVideoX 2B",
         "style": "High quality, cinematic",
         "vram": "~12 GB",
+        "min_vram_mb": 12000,  # tight but runs on the node's 12 GB card
         "size": "~9 GB",
         "source": "HuggingFace (no auth)",
         "note": "Use steps=50, CFG=6.0. May be tight on 12 GB VRAM.",
         "rec_steps": 50,
         "steps_options": [30, 40, 50],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 6.0, "strength": 0.7},
     },
     {
         "model_id": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
         "label": "Wan2.1 T2V 14B ★ (high quality)",
         "style": "Much sharper motion & detail than the 1.3B default",
         "vram": "~20-24 GB",
+        "min_vram_mb": 20000,  # machine-readable VRAM floor — the node's 12 GB card can't run it
         "size": "~28 GB",
         "source": "HuggingFace (no auth)",
         "note": "Great fit for your dual-3060 (24 GB).",
         "rec_steps": 25,
         "steps_options": [20, 25, 30],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 5.0, "strength": 0.7},
     },
     {
         "model_id": "THUDM/CogVideoX-5b",
         "label": "CogVideoX 5B",
         "style": "Higher fidelity than 2B",
         "vram": "~16-24 GB",
+        "min_vram_mb": 16000,  # machine-readable VRAM floor — the node's 12 GB card can't run it
         "size": "~20 GB",
         "source": "HuggingFace (no auth)",
         "note": "Steps 50, CFG 6. Needs 24 GB comfortably.",
         "rec_steps": 50,
         "steps_options": [30, 40, 50],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 6.0, "strength": 0.7},
     },
     {
         "model_id": "tencent/HunyuanVideo",
         "label": "Hunyuan Video (SOTA)",
         "style": "State-of-the-art open video — cinematic",
         "vram": "~24 GB+ (with offload)",
+        "min_vram_mb": 24000,  # machine-readable VRAM floor — the node's 12 GB card can't run it
         "size": "~40 GB",
         "source": "HuggingFace (no auth)",
         "note": "Very heavy; use CPU offload even on 24 GB.",
         "rec_steps": 30,
         "steps_options": [20, 30, 50],
+        "gen_defaults": {"width": 832, "height": 480, "num_frames": 49,
+                         "steps": 20, "fps": 16, "guidance": 5.0, "strength": 0.7},
     },
 ]
+
+# Validation table for owner overrides of gen_defaults: key → (type, min, max).
+# Anything outside this table (or these bounds) is rejected/ignored, so a bad
+# saved value can never wedge the generation pipeline.
+VIDEO_GEN_TUNABLES = {
+    "width":      (int,   64,   1920),
+    "height":     (int,   64,   1920),
+    "num_frames": (int,   9,    481),
+    "steps":      (int,   1,    100),
+    "fps":        (int,   4,    60),
+    "guidance":   (float, 0.0,  20.0),
+    "strength":   (float, 0.05, 1.0),
+}
+
+
+def video_model_gen_defaults(model_id: str) -> dict:
+    """Catalog gen_defaults for a video model (as a copy, safe to mutate).
+    Unknown/off-catalog models get the global defaults routers/videos.py has
+    always applied — note: no `guidance` key, so nothing extra is ever passed
+    to the generator for models we don't know (preserves old behavior)."""
+    for m in RECOMMENDED_VIDEO_MODELS:
+        if m.get("model_id") == model_id and isinstance(m.get("gen_defaults"), dict):
+            return dict(m["gen_defaults"])
+    return {"width": 832, "height": 480, "num_frames": 49,
+            "steps": 20, "fps": 16, "strength": 0.7}

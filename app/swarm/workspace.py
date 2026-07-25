@@ -1,10 +1,14 @@
-"""Dev Swarm — git sandboxing + file scoping in the dev worktree.
+"""Dev Swarm — git sandboxing + file scoping in the working worktree.
 
-All edits happen in config.REPO_DEV; scoped jobs may only touch their listed paths.
-Parsing the coder's strict fenced FILE format and reading real code for context also
-lives here.
+The working directory is a function of the job's project (dev_projects) and its
+`work_branch` toggle: the store-on-dev default is config.REPO_DEV (unchanged);
+`work_branch='main'` edits the project's LIVE worktree instead — but the human
+merge gate (/approve → /promote or a gated push) still applies before anything
+reaches the live remote. Scoped jobs may only touch their listed paths.
+Parsing the coder's strict fenced FILE format and reading real code for context
+also lives here.
 
-No intra-package dependencies.
+No intra-package dependencies (db/config only).
 """
 import json
 import re
@@ -12,10 +16,11 @@ import subprocess
 from pathlib import Path
 
 from config import REPO_DEV, GIT_BIN
+from db import get_conn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# dev worktree helpers
+# worktree helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def _git_dev(*args, timeout=60) -> tuple[int, str]:
     try:
@@ -24,6 +29,87 @@ def _git_dev(*args, timeout=60) -> tuple[int, str]:
         return r.returncode, (r.stdout + r.stderr).strip()
     except Exception as e:
         return 1, str(e)
+
+
+def _git_ws(base: str, *args, timeout=60) -> tuple[int, str]:
+    """git in an arbitrary project worktree (same contract as _git_dev)."""
+    try:
+        r = subprocess.run([GIT_BIN, "-C", str(base), *args],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# project resolution — which worktree does this job edit?
+# ─────────────────────────────────────────────────────────────────────────────
+def _job_project(job: dict) -> dict | None:
+    """The job's dev_projects row: via swarm_jobs.project_id, else the primary
+    store project (legacy jobs with project_id NULL belong to the store)."""
+    try:
+        conn = get_conn()
+        row = None
+        pid = (job or {}).get("project_id")
+        if pid:
+            row = conn.execute("SELECT * FROM dev_projects WHERE id=?", (pid,)).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT * FROM dev_projects WHERE is_primary=1 ORDER BY id LIMIT 1").fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT * FROM dev_projects WHERE kind='store' ORDER BY id LIMIT 1").fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _job_workdir(job: dict) -> str:
+    """Base directory the swarm edits for this job. work_branch='dev' → the
+    project's dev worktree (store = REPO_DEV, the historical default);
+    work_branch='main' → the project's live worktree. The merge gate is about
+    pushing to the LIVE remote and applies in both cases."""
+    p = _job_project(job)
+    if not p:
+        return REPO_DEV
+    wb = (p.get("work_branch") or "dev").strip() or "dev"
+    if wb == "dev":
+        return p.get("dev_path") or p.get("local_path") or REPO_DEV
+    return p.get("local_path") or p.get("dev_path") or REPO_DEV
+
+
+def _push_ws(base: str, branch: str = None) -> tuple[bool, str, str]:
+    """Best-effort push of the workdir's branch to origin, so swarm commits land
+    on the GitHub dev branch (pipeline stage 2). Never raises: returns
+    (ok, branch, detail) and the caller logs the outcome either way."""
+    try:
+        if not branch:
+            rc, cur = _git_ws(base, "rev-parse", "--abbrev-ref", "HEAD")
+            branch = cur.strip() if rc == 0 and cur.strip() else "dev"
+        rc, out = _git_ws(base, "push", "origin", branch, timeout=120)
+        return rc == 0, branch, out[:300]
+    except Exception as e:
+        return False, branch or "?", str(e)[:300]
+
+
+def _prepare_workdir(job: dict) -> str:
+    """Resolve the job's working directory and, for non-store projects with a
+    single checkout, put it on the branch the work_branch toggle selects
+    ('main' → the project's live branch; 'dev' → a dev branch, created on
+    first use). The store's worktrees are already pinned to their branches."""
+    p = _job_project(job)
+    base = _job_workdir(job)
+    if not p or (p.get("kind") or "") == "store":
+        return base
+    wb = (p.get("work_branch") or "dev").strip() or "dev"
+    target = (p.get("live_branch") or "main") if wb == "main" else "dev"
+    rc, cur = _git_ws(base, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc == 0 and cur.strip() and cur.strip() != target:
+        rc2, _out = _git_ws(base, "checkout", target)
+        if rc2 != 0 and target == "dev":
+            _git_ws(base, "checkout", "-b", "dev")
+    return base
 
 
 def _scoped_paths(job: dict) -> list[str]:
@@ -69,16 +155,17 @@ def _read_scoped_context(job: dict, limit_bytes=12000) -> str:
     scope = job.get("scope") or "project"
     if scope == "project":
         return "(whole-project scope — no specific files preloaded)"
+    base = _job_workdir(job)
     chunks = []
     for p in _scoped_paths(job):
-        fp = Path(REPO_DEV) / p.strip().lstrip("/")
+        fp = Path(base) / p.strip().lstrip("/")
         if fp.is_file():
             try:
                 txt = fp.read_text(errors="replace")[:limit_bytes]
                 chunks.append(f"<<<FILE {p}>>>\n{txt}\n<<<END>>>")
             except Exception:
                 pass
-    return "\n\n".join(chunks) or "(scoped files not found in dev worktree)"
+    return "\n\n".join(chunks) or "(scoped files not found in the working worktree)"
 
 
 def _fallback_single_file(out: str, job: dict) -> list[tuple[str, str]]:
@@ -93,10 +180,10 @@ def _fallback_single_file(out: str, job: dict) -> list[tuple[str, str]]:
     return []
 
 
-def _repo_tree() -> str:
-    """A compact map of the dev worktree's real layout so the architect scopes subtasks
-    to paths that actually exist (not invented src/… paths)."""
-    rc, out = _git_dev("ls-files")
+def _repo_tree(base: str = None) -> str:
+    """A compact map of the working worktree's real layout so the architect scopes
+    subtasks to paths that actually exist (not invented src/… paths)."""
+    rc, out = _git_ws(base or REPO_DEV, "ls-files")
     files = out.split()
     if not files:
         return "(repo layout unavailable)"
@@ -110,12 +197,12 @@ def _repo_tree() -> str:
             "\nstatic/js: " + ", ".join(static_sub))
 
 
-def _read_files(paths: list, per: int = 2500, total: int = 12000) -> tuple[str, list]:
-    """Read a few existing files from the dev worktree (truncated) so the architect plans
-    against the REAL code. Returns (bundle_text, actually_read_paths)."""
+def _read_files(paths: list, per: int = 2500, total: int = 12000, base: str = None) -> tuple[str, list]:
+    """Read a few existing files from the working worktree (truncated) so the architect
+    plans against the REAL code. Returns (bundle_text, actually_read_paths)."""
     chunks, read, used = [], [], 0
     for p in paths[:6]:
-        fp = Path(REPO_DEV) / p.strip().lstrip("/")
+        fp = Path(base or REPO_DEV) / p.strip().lstrip("/")
         if not fp.is_file():
             continue
         try:

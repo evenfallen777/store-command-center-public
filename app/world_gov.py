@@ -9,7 +9,7 @@ here ever collides with an image/video render. Meetings are pure CPU (no model).
 """
 import time, json, random, re
 
-from deps import get_conn, _call_lmstudio
+from deps import get_conn, _call_lmstudio, orch
 from world_defs import (DEPARTMENTS, run_llm_job, mget, mset, log_agent, log_town)
 
 # ── canned fallbacks (used when the local model is busy/weak) ──────────────────
@@ -103,7 +103,7 @@ def agent_think(agent_id=None, wait=45):
               f"Job: {a['name']} who works the {dept}, {state_desc}.\n{mem}Line:")
 
     def _job():
-        text = _clean_thought(_call_lmstudio(system, prompt, 40), a["name"]) or _canned_thought(a)
+        text = _clean_thought(orch.llm_borrow(lambda: _call_lmstudio(system, prompt, 40)), a["name"]) or _canned_thought(a)
         c2 = get_conn()
         c2.execute("UPDATE world_agents SET mood=?, updated_at=datetime('now') WHERE id=?", (text, a["id"]))
         c2.execute("INSERT INTO world_events (agent_key,kind,text) VALUES (?,?,?)",
@@ -143,7 +143,7 @@ def generate_opinion(agent_id=None, wait=0):
 
     def _job():
         text, category = None, "ops"
-        line = _first_sentence(_call_lmstudio(system, prompt, 48))
+        line = _first_sentence(orch.llm_borrow(lambda: _call_lmstudio(system, prompt, 48)) or "")
         if line and len(line.split()) >= 4 and not line.lower().startswith(("you are", "job", "line", "answer")):
             text = line
         if not text:

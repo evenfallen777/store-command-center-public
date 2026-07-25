@@ -10,11 +10,12 @@ orchestrator (one model in VRAM at a time), comment/audit/vote, apply to the dev
 branch, test, human-approve, promote dev→master→retail; cron to keep working WIP.
 
 This module is a package: the router + shared helpers live in ``_base``; the routes
-are split across ``repos`` (Domain A), ``models`` (Domain B) and ``jobs`` (Domain C).
+are split across ``repos`` (Domain A), ``models`` (Domain B), ``jobs`` (Domain C)
+and ``projects`` (Domain D — the per-project registry + Engineers settings).
 Importing the submodules runs their ``@router.*`` decorators, registering every route
 on the single shared ``router`` exposed here.
 """
 from ._base import router          # shared router + one-time schema/reconcile side effects
-from . import repos, models, jobs  # noqa: F401  (import registers their @router routes)
+from . import repos, models, jobs, projects, devstore, collab  # noqa: F401  (import registers their @router routes)
 
 __all__ = ["router"]

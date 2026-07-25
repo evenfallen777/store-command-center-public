@@ -299,7 +299,10 @@ async function renderDashboard() {
   }).catch(() => { if (stillHere()) { patch('dash-mail', '—'); patch('await-mailct', 'mail off'); } });
 }
 
-/* ══ STORE STATS ══ */
+/* ══ STORE STATS ══
+   The standalone Stats subtab folded into Etsy/Printify → Dashboard, which
+   embeds the same numbers via loadStoreStatsInto('ep-stats-body'). The old
+   full-view renderer is kept as a thin shell for any legacy caller. */
 async function renderStoreStats() {
   _setContent(`
     <div class="view-header">
@@ -308,6 +311,14 @@ async function renderStoreStats() {
       <button class="btn-sm" onclick="renderStoreStats()">&#8635; Refresh</button>
     </div>
     <div id="stats-body" style="padding:0 4px;"><div style="color:var(--muted);margin-top:20px;text-align:center;">&#8987; Loading&hellip;</div></div>`);
+  await loadStoreStatsInto('stats-body');
+}
+
+/* Fetch /api/store-stats and paint the Printify + Etsy blocks into any
+   container. Never throws — errors render inline in the target element. */
+async function loadStoreStatsInto(targetId) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
   try {
     const st = await api('/api/store-stats');
     let h = '';
@@ -317,7 +328,7 @@ async function renderStoreStats() {
     if (st.error?.printify) {
       h += `<div style="color:var(--error);font-size:.8rem;">Error: ${esc(st.error.printify)}</div>`;
     } else if (!st.printify) {
-      h += `<div style="color:var(--muted);font-size:.8rem;">Not configured — add Printify API key in Settings.</div>`;
+      h += `<div style="color:var(--muted);font-size:.8rem;">Not configured — add your Printify API key in Store Configuration below.</div>`;
     } else {
       const p = st.printify;
       h += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:6px;">`;
@@ -332,10 +343,14 @@ async function renderStoreStats() {
 
     // ── Etsy ────────────────────────────────────────────────────
     h += `<div class="settings-group"><div class="settings-group-title">&#128717; Etsy</div>`;
-    if (st.error?.etsy) {
+    if (st.etsy_reconnect) {
+      // Stale OAuth — clean CTA instead of a raw error string.
+      h += `<div style="color:var(--warning,#e6a23c);font-size:.8rem;">&#9888; ${esc(st.error?.etsy || 'Etsy authorization expired.')} `;
+      h += `<button class="btn-sm" onclick="reconnectEtsy()">&#128260; Reconnect Etsy</button></div>`;
+    } else if (st.error?.etsy) {
       h += `<div style="color:var(--error);font-size:.8rem;">Error: ${esc(st.error.etsy)}</div>`;
     } else if (!st.etsy) {
-      h += `<div style="color:var(--muted);font-size:.8rem;">Not connected — authorize Etsy in Settings.</div>`;
+      h += `<div style="color:var(--muted);font-size:.8rem;">Not connected — authorize Etsy in Store Configuration below.</div>`;
     } else {
       const e = st.etsy;
       h += `<div style="font-size:.8rem;color:var(--muted);margin-bottom:8px;">Shop: <b style="color:var(--text);">${esc(e.shop_name)}</b></div>`;
@@ -362,8 +377,16 @@ async function renderStoreStats() {
     }
     h += `</div>`;
 
-    document.getElementById('stats-body').innerHTML = h;
+    target.innerHTML = h;
   } catch(e) {
-    document.getElementById('stats-body').innerHTML = `<div style="color:var(--error);margin-top:20px;">${esc(e.message)}</div>`;
+    target.innerHTML = `<div style="color:var(--error);margin-top:20px;">${esc(e.message)}</div>`;
   }
 }
+
+/* Re-run the Etsy OAuth flow (same endpoint as first-time Connect). Used by the
+   "Reconnect Etsy" CTA shown when the refresh token has gone stale. */
+async function reconnectEtsy() {
+  try { const r = await api('/api/etsy/connect'); if (r.url) window.open(r.url, '_blank'); }
+  catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+window.reconnectEtsy = reconnectEtsy;

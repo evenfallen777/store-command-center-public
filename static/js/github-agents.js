@@ -17,16 +17,16 @@ async function ghRenderAgents() {
 
   body.innerHTML = `
     <div style="background:rgba(108,99,255,.08);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:.74rem;color:var(--muted);margin-bottom:14px;line-height:1.6;">
-      &#9888;&#65039; <b>Only one model loads in VRAM at a time</b>, so agent turns run <b>sequentially</b> (swapping models between turns).
+      &#8505;&#65039; <b>Only one model loads in VRAM at a time</b>, so agent turns run <b>sequentially</b>. The swarm requests its model through the <b>unified GPU queue</b> — the orchestrator loads it <b>on demand</b> when a turn runs (serialized with image/video), so you do <b>not</b> need a model pre-loaded.
       ${allModels.length ? allModels.length + ' local models detected.' : '<br>No local models detected — is LM Studio running on the GPU box?'}
     </div>
 
     <div class="settings-group">
-      <div class="settings-group-title">&#128190; GPU model — load &amp; pin</div>
+      <div class="settings-group-title">&#128190; GPU model — pin (optional)</div>
       <div id="gh-loaded" style="font-size:.8rem;margin-bottom:10px;">
         ${loaded.loaded
           ? `<span style="color:#22c55e;">&#9679; resident: <b>${esc(loaded.loaded)}</b></span> <span style="color:var(--muted);">· context ${loaded.context || '?'} tokens</span>`
-          : '<span style="color:var(--warn);">&#9679; nothing resident — load a model so turns don\'t stall</span>'}
+          : '<span style="color:var(--muted);">&#9679; nothing resident — fine: the swarm loads its model on demand via the queue. Pinning below is optional (keeps one warm to skip the first-turn load).</span>'}
       </div>
       ${(loaded.checks || []).map(c => `<div style="font-size:.72rem;color:${c.level === 'warn' ? 'var(--warn)' : 'var(--muted)'};margin-bottom:4px;">${c.level === 'warn' ? '&#9888;&#65039;' : '&#8505;&#65039;'} ${esc(c.msg)}</div>`).join('')}
       <div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;align-items:end;margin-top:8px;">
@@ -34,12 +34,12 @@ async function ghRenderAgents() {
           <select id="gh-pin-model">${allModels.map(m => `<option value="${esc(m)}" ${m === loaded.loaded ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
         <div class="field" style="margin:0;"><label>Context length ${hlp('The token context window for the pinned model. Bigger fits more code/history per turn but uses more VRAM and runs slower.')}</label>
           <input type="number" id="sw-context" value="${cfg.context || 16384}" min="2048" max="131072" step="2048"></div>
-        <button class="btn-sm primary" onclick="ghLoadPin()" title="Load the chosen model into VRAM on the GPU box at the given context and keep it resident (unloading others to fit). Do this before a run so the swarm's turns don't stall loading a model.">Load &amp; pin</button>
+        <button class="btn-sm primary" onclick="ghLoadPin()" title="OPTIONAL: pre-load the chosen model through the unified queue to keep it warm, so the swarm's first turn doesn't pay the load cost. Not required — the swarm loads its model on demand either way.">Load &amp; pin</button>
       </div>
-      <div style="font-size:.7rem;color:var(--muted);margin-top:6px;">Pinning unloads others to fit and keeps this model resident (no auto-unload). The swarm borrows whatever's resident, so pin your coding model before a run.</div>
+      <div style="font-size:.7rem;color:var(--muted);margin-top:6px;">Optional warm-up. The swarm always requests its model through the unified queue (loaded on demand); pinning just pre-loads one so the first turn is instant. Loads go through the orchestrator — never raw LM Studio.</div>
       <label style="font-size:.78rem;display:flex;gap:6px;align-items:center;cursor:pointer;margin-top:8px;">
         <input type="checkbox" id="sw-autopin" ${cfg.auto_pin !== false ? 'checked' : ''}>
-        Auto-pin the job's coder model before each run (recommended) ${hlp('Before each run, automatically load the job coder model into VRAM so turns never stall waiting on a model swap. Leave on unless you want to manage the resident model by hand.')}</label>
+        Auto-pin the job's coder model before each run (optional warm-up) ${hlp('Before each run, pre-load the job coder model (through the unified queue) so the first turn is instant. Off is fine too — the swarm still loads its model on demand via the queue. Purely a warm-up convenience now.')}</label>
       <label style="font-size:.78rem;display:flex;gap:6px;align-items:center;cursor:pointer;margin-top:6px;">
         <input type="checkbox" id="sw-restart" ${cfg.restart_after_promote ? 'checked' : ''}>
         Auto-restart the live app after a promote (so approved code goes live immediately) ${hlp('After a successful promote, restart this Store app automatically so the new master code runs at once - instead of you clicking Restart live app in Workflow. Causes a few seconds of downtime.')}</label>

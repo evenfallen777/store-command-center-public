@@ -2,16 +2,41 @@
    Reads _worldState (already fetched by tab-world.js) — no backend calls. Aggregates
    per-agent economy into a company P&L view. Shared global-scope classic script. */
 
-// shared modal helper (reuses the world modal); also used by world-character.js
+/* ── console host resolution (Phase 2 — standalone Command tab) ──────────────
+   The console can paint into two places: inline in the standalone Command
+   tab (#command-title/#command-strip/#command-body, tab-command.js) when
+   that tab is open, or the game's God Console modal (#world-modal-*, the
+   original host) when opened from the World HUD's 🏛️ button. Command wins
+   when present — the two hosts are mutually exclusive (only one view is
+   ever on screen), so this is a simple existence check, not a priority
+   fight. Every world*() console-tab function is unchanged; they still just
+   call _worldModal/_consoleStrip. */
+function _consoleHost() {
+  const ct = document.getElementById('command-title');
+  if (ct) return {
+    title: ct,
+    body: document.getElementById('command-body'),
+    strip: document.getElementById('command-strip'),
+    modal: null,   // Command tab hosts inline — no overlay to show/hide
+  };
+  return {
+    title: document.getElementById('world-modal-title'),
+    body: document.getElementById('world-modal-body'),
+    strip: document.getElementById('world-modal-tabs'),
+    modal: document.getElementById('world-modal'),
+  };
+}
+
+// shared modal helper (reuses the world modal, or the Command tab inline host);
+// also used by world-character.js
 function _worldModal(title, html) {
-  const t = document.getElementById('world-modal-title');
-  const b = document.getElementById('world-modal-body');
-  if (!t || !b) return;
-  t.textContent = title;
-  b.style.whiteSpace = 'normal';
+  const h = _consoleHost();
+  if (!h.title || !h.body) return;
+  h.title.textContent = title;
+  h.body.style.whiteSpace = 'normal';
   _consoleStrip();
-  b.innerHTML = html;
-  document.getElementById('world-modal').style.display = 'flex';
+  h.body.innerHTML = html;
+  if (h.modal) h.modal.style.display = 'flex';
 }
 
 /* ── the consolidated God Console ─────────────────────────────────────────────
@@ -20,20 +45,42 @@ function _worldModal(title, html) {
    of a wall of header buttons. Each tab still renders through its own
    world*() function + _worldModal; while a console session is active the
    strip persists across those renders, so in-tab refreshes keep the tabs. */
-const WORLD_CONSOLE_TABS = [
-  { key: 'god',       icon: '🏛️', label: 'Prayers',    fn: () => worldGod() },
-  { key: 'workboard', icon: '🗂️', label: 'Workboard',  fn: () => worldWorkboard() },
-  { key: 'work',      icon: '📌', label: 'Priorities', fn: () => worldWorkTab() },
-  { key: 'control',   icon: '🎛️', label: 'Control',    fn: () => worldControl() },
-  { key: 'republic',  icon: '⚖️', label: 'Republic',   fn: () => worldRepublic() },
-  { key: 'board',     icon: '📋', label: 'Board',      fn: () => worldBoard() },
-  { key: 'bible',     icon: '📖', label: 'Bible',      fn: () => worldBible() },
-  { key: 'finances',  icon: '📊', label: 'Finances',   fn: () => worldFinances() },
-  { key: 'roster',    icon: '🧑‍🤝‍🧑', label: 'Roster',  fn: () => worldRoster() },
-  { key: 'research',  icon: '🔬', label: 'Research',   fn: () => worldResearch() },
-  { key: 'schedule',  icon: '🕐', label: 'Schedule',   fn: () => worldSchedule() },
-  { key: 'settings',  icon: '⚙️', label: 'Settings',   fn: () => worldSettings() },
+/* God-Panel reorg: the flat 13-tab wall becomes a MANAGED control surface —
+   labeled sections with a consistent flow (switches → approvals → governance →
+   company → setup). worldConsole(key) is unchanged, so every existing caller
+   (HUD 🏛️ button, badge refreshers, in-tab repaints) keeps working; the flat
+   WORLD_CONSOLE_TABS list is derived from the sections for the same reason. */
+const WORLD_CONSOLE_SECTIONS = [
+  { label: '🕹 Control', tabs: [
+    { key: 'breakers',  icon: '🎛️', label: 'Breakers',     fn: () => worldBreakers() },
+    { key: 'control',   icon: '🤖', label: 'Systems',      fn: () => worldControl() },
+    { key: 'caps',      icon: '⚡', label: 'Capabilities', fn: () => worldCaps() },
+    { key: 'loops',     icon: '🕸️', label: 'Loops',        fn: () => worldLoops() },
+    { key: 'jesus',     icon: '✝️', label: 'Jesus',        fn: () => worldJesus() },
+    { key: 'satan',     icon: '😈', label: 'Satan',        fn: () => worldSatan() },
+  ] },
+  { label: '🙏 Approvals', tabs: [
+    { key: 'god',       icon: '🏛️', label: 'Prayers',    fn: () => worldGod() },
+    { key: 'workboard', icon: '🗂️', label: 'Workboard',  fn: () => worldWorkboard() },
+  ] },
+  { label: '⚖️ Governance', tabs: [
+    { key: 'republic',  icon: '⚖️', label: 'Republic',   fn: () => worldRepublic() },
+    { key: 'board',     icon: '📋', label: 'Board',      fn: () => worldBoard() },
+    { key: 'bible',     icon: '📖', label: 'Bible',      fn: () => worldBible() },
+  ] },
+  { label: '🏢 Company', tabs: [
+    { key: 'work',      icon: '📌', label: 'Priorities', fn: () => worldWorkTab() },
+    { key: 'workgiver', icon: '🧭', label: 'WorkGiver',  fn: () => worldWorkGiver() },
+    { key: 'roster',    icon: '🧑‍🤝‍🧑', label: 'Roster',  fn: () => worldRoster() },
+    { key: 'finances',  icon: '📊', label: 'Finances',   fn: () => worldFinances() },
+    { key: 'research',  icon: '🔬', label: 'Research',   fn: () => worldResearch() },
+    { key: 'schedule',  icon: '🕐', label: 'Schedule',   fn: () => worldSchedule() },
+  ] },
+  { label: '⚙️ Setup', tabs: [
+    { key: 'settings',  icon: '⚙️', label: 'Settings',   fn: () => worldSettings() },
+  ] },
 ];
+const WORLD_CONSOLE_TABS = WORLD_CONSOLE_SECTIONS.flatMap(s => s.tabs);
 let _consoleActive = null;
 function worldConsole(key) {
   const tab = WORLD_CONSOLE_TABS.find(x => x.key === key) || WORLD_CONSOLE_TABS[0];
@@ -41,16 +88,44 @@ function worldConsole(key) {
   try { tab.fn(); } catch (e) { toast?.(e.message); }
 }
 function _consoleStrip() {
-  const strip = document.getElementById('world-modal-tabs');
+  const strip = _consoleHost().strip;
   if (!strip) return;
   if (!_consoleActive) { strip.style.display = 'none'; strip.innerHTML = ''; return; }
   strip.style.display = 'flex';
-  strip.innerHTML = WORLD_CONSOLE_TABS.map(tb =>
-    `<button class="btn" style="padding:3px 9px;font-size:.7rem;white-space:nowrap;${tb.key === _consoleActive
-       ? 'background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd' : ''}"
-       onclick="worldConsole('${tb.key}')">${tb.icon} ${tb.label}</button>`).join('');
+  strip.innerHTML = WORLD_CONSOLE_SECTIONS.map(sec => `
+    <span style="display:inline-flex;align-items:center;gap:4px;margin:1px 8px 1px 0;padding:2px 4px 2px 2px;
+                 border:1px solid #1b2740;border-radius:8px;background:#0b111f">
+      <span style="font-size:.58rem;color:#54607a;letter-spacing:.05em;text-transform:uppercase;
+                   padding:0 4px;white-space:nowrap">${sec.label}</span>
+      ${sec.tabs.map(tb => {
+        // display-label theming only (world-theme.js): themed default returns
+        // null → today's exact icon/label; the console KEY never changes.
+        const nm = window.WTheme?.tab?.(tb.key);
+        return `<button class="btn" style="padding:3px 9px;font-size:.7rem;white-space:nowrap;border-radius:6px;${tb.key === _consoleActive
+           ? 'background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd' : 'border-color:transparent'}"
+           onclick="worldConsole('${tb.key}')">${nm?.icon || tb.icon} ${nm?.label || tb.label}</button>`;
+      }).join('')}
+    </span>`).join('');
 }
 window.worldConsole = worldConsole;
+
+/* ── standalone-state bootstrap (Phase 2) ─────────────────────────────────────
+   worldFinances/worldRoster/worldWorkTab read _worldState (world-map.js /
+   tab-world.js's game-loop poll) rather than calling the API themselves. In
+   the game tab that poll has always populated it by the time you'd open the
+   console; from the standalone Command tab the poll never runs, so _worldState
+   is still null. This fetches it once (a single /api/world/state — the same
+   call _pollWorld() makes) and caches it into the SAME shared `_worldState`
+   binding (declared in tab-world.js; classic scripts share one global lexical
+   scope) so every other reader keeps working unmodified. Safe to call from
+   the game tab too — it's a no-op once _worldState is already set. */
+async function _ensureWorldState() {
+  if (_worldState) return _worldState;
+  try { _worldState = await api('/api/world/state'); }
+  catch (e) { toast?.('World failed to load'); }
+  return _worldState;
+}
+window._ensureWorldState = _ensureWorldState;
 
 function _finStat(label, val, color) {
   return `<div style="background:#0e1626;border:1px solid #26324a;border-radius:8px;padding:8px 10px">
@@ -58,8 +133,8 @@ function _finStat(label, val, color) {
     <div style="font-size:1.1rem;font-weight:700;color:${color || '#e8eefc'}">${val}</div></div>`;
 }
 
-function worldFinances() {
-  const st = _worldState;
+async function worldFinances() {
+  const st = await _ensureWorldState();
   if (!st) { toast?.('World not loaded yet'); return; }
   const co = st.company || {}, econ = st.economy || {}, ags = st.agents || [], depts = st.departments || [];
 

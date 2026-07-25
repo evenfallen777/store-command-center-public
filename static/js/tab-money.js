@@ -32,11 +32,13 @@ async function renderMoney() {
     <div class="stats-row" id="money-stats"></div>
     <div id="money-signals" style="margin-bottom:18px;"></div>
     <div id="money-cashapp" style="margin-bottom:18px;"></div>
+    <div id="money-donate" style="margin-bottom:18px;"></div>
     <div id="money-add" style="margin-bottom:18px;"></div>
     <div id="money-missions"></div>`;
   await loadMoStats();
   await loadMoSignals();
   await loadMoCashApp();
+  await loadMoDonate();
   renderMoAdd();
   await loadMoMissions();
 }
@@ -427,6 +429,27 @@ async function moCaGate(key, on) {
 }
 
 window.loadMoCashApp = loadMoCashApp;
+
+/* ── Donate (real-money rail #3 — Buy Me a Coffee link, receive only) ─────────
+   Toggle-controlled, default OFF (GET /api/donate/config → {enabled, url}). No
+   handle is ever hardcoded here — a fresh public clone gets an empty/hidden
+   card until the owner sets donate_bmc_user + donate_enabled in Settings →
+   Integrations. A donate link moves no money itself, so no approval gate. */
+async function loadMoDonate() {
+  const el = document.getElementById('money-donate');
+  if (!el) return;
+  let d;
+  try { d = await api('/api/donate/config'); } catch { el.innerHTML = ''; return; }
+  if (!d || !d.enabled || !d.url) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="card" style="padding:16px 18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div style="font-weight:700;font-size:1rem;">&#9749; Support this project
+        ${hlp('A Buy Me a Coffee link, set in Settings → Integrations. Purely receive-only — no approval gate, since a donate link moves no money itself. Off by default on a fresh clone until the owner sets a handle and flips this on.')}
+      </div>
+      <a class="btn-sm primary" href="${esc(d.url)}" target="_blank" rel="noopener">&#9749; Support this project</a>
+    </div>`;
+}
+window.loadMoDonate = loadMoDonate;
 window.moCaSave = moCaSave;
 window.moCaVerify = moCaVerify;
 window.moCaRequest = moCaRequest;

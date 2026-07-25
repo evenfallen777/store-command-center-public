@@ -428,6 +428,19 @@ def render_world_png(base: str = "http://127.0.0.1:8787", password: str = "",
                     f"refusing to render: {len(overlaps)} text overlay(s) still cover "
                     f"the world canvas: {overlaps[:3]}")
 
+            # Frame the WHOLE map, centered. The world view's default camera is zoomed
+            # in on HQ (_worldZoomHome zooms ~2.1x) or a restored pan, so a raw shot
+            # publishes only a corner (~1/4). WM.fit() recomputes the camera to fit the
+            # full map to the canvas — same as the app's "recenter" — then we wait a
+            # frame for the RAF loop to repaint before capturing.
+            page.evaluate("""
+                () => {
+                  const cv = document.getElementById('world-canvas');
+                  if (cv && window.WM && WM.fit) WM.fit(cv._cssW || cv.clientWidth, cv._cssH || cv.clientHeight);
+                }
+            """)
+            page.wait_for_timeout(1200)
+
             el = page.query_selector("#world-canvas")
             if el is None:
                 raise RuntimeError("world canvas never appeared")

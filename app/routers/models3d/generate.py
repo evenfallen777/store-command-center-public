@@ -4,7 +4,7 @@ box) and the 3D-tuned prompt enhancer.
 from fastapi import HTTPException, BackgroundTasks
 
 from deps import *
-from services import generate_model3d_mesh
+from services import generate_model3d_mesh, check_3d_vram_or_raise
 
 from ._base import router
 
@@ -50,15 +50,16 @@ def generate_model3d_ep(req: Generate3dRequest, background_tasks: BackgroundTask
         _nsfw.require_enabled()
         _nsfw.refuse_unsafe(req.prompt or "", req.title or "")
     gen = _resolve_generator(req.generator)
+    check_3d_vram_or_raise(gen)   # fail fast if this generator can't fit on the node's GPU
     gen_script = gen["script"]
     gen_label = gen["label"].split(" (")[0]
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO models3d (file_path,file_name,file_ext,title,status,source,gen_prompt,"
-        "rel_dir,category,progress_msg,nsfw) VALUES ('','','',?,'generating','generated',?,"
-        "'generated','Generated','⏳ Queued…',?)",
+        "rel_dir,category,progress_msg,nsfw,generator) VALUES ('','','',?,'generating','generated',?,"
+        "'generated','Generated','⏳ Queued…',?,?)",
         (req.title or (req.prompt or "Generated model")[:80],
-         req.prompt or f"from {req.image_path}", 1 if req.nsfw else 0))
+         req.prompt or f"from {req.image_path}", 1 if req.nsfw else 0, req.generator))
     model_id = cur.lastrowid
     conn.commit(); conn.close()
 

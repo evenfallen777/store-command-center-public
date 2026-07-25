@@ -384,6 +384,23 @@
     });
     h += pluginsBlock(data.plugins || []);
     h += `</div>`;
+
+    /* Store Logs — moved here from the System pane (admin.js still owns the
+       loadStoreLogs/toggleLogAuto loaders; they're window-globals). */
+    h += `
+      <div class="settings-group" style="margin-top:20px;">
+        <div class="settings-group-title">&#128220; Store Logs</div>
+        <div style="font-size:.75rem;color:var(--muted);margin-bottom:8px;">Everything the server logs — errors, warnings, background jobs. Rotating file in the data folder.</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+          <select id="log-level" onchange="loadStoreLogs()" style="padding:5px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem;">
+            <option value="">All</option><option value="ERROR">Errors</option><option value="WARNING">Warnings+</option></select>
+          <input id="log-search" placeholder="filter text…" onkeydown="if(event.key==='Enter')loadStoreLogs()" style="flex:1;min-width:120px;padding:5px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem;">
+          <button class="btn-sm" onclick="loadStoreLogs()">&#128260; Refresh</button>
+          <label style="font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" id="log-auto" onchange="toggleLogAuto()"> auto</label>
+          <span id="log-tally" style="font-size:.72rem;color:var(--muted);"></span>
+        </div>
+        <pre id="store-logs" style="max-height:360px;overflow:auto;background:#0b0b0f;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:.7rem;line-height:1.35;white-space:pre-wrap;color:#cbd5e1;margin:0;">Loading&hellip;</pre>
+      </div>`;
     pane.innerHTML = h;
 
     const f = document.getElementById('sys-filter');
@@ -396,5 +413,6 @@
     }
 
     renderHealthPulse();   // fill 🩺 Health at the top + start polling while open
+    if (typeof loadStoreLogs === 'function') loadStoreLogs();   // fill 📜 Store Logs (admin.js loader)
   };
 })();

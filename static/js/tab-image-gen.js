@@ -73,7 +73,9 @@ function _igCard(d) {
       <div class="image-card-title" title="${esc(prompt)}">${esc(prompt) || '&mdash;'}</div>
       <div class="image-card-actions">
         <button class="btn-sm primary" data-action="ig-send-review" data-id="${d.id}">&#10132; Review</button>
-        <a class="btn-sm" href="${esc(url)}" download style="text-decoration:none;">&#11015; Save</a>
+        <a class="btn-sm" href="${API}/api/designs/${d.id}/export?spec=etsy" download style="text-decoration:none;" title="Download 1024×1024 JPEG, ≤5MB — Etsy spec">&#127991; Etsy</a>
+        <a class="btn-sm" href="${API}/api/designs/${d.id}/export?spec=web" download style="text-decoration:none;" title="Download 1600px JPEG — web/store">&#127760; Web</a>
+        <a class="btn-sm" href="${esc(url)}" download style="text-decoration:none;" title="Download full-res master (print quality)">&#11015; Full</a>
         <button class="btn-sm" data-action="ig-discard" data-id="${d.id}" style="color:var(--red);border-color:var(--red);">&#128465; Discard</button>
       </div>
     </div>

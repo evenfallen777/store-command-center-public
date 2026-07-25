@@ -34,7 +34,7 @@ _TASK_MAP = {
     "listing_copy": "studio", "pricing": "studio",
     "video_chain": "studio", "audio_music": "studio", "audio_voice": "studio",
     "threed_listing": "3d", "threed_enhance": "3d",
-    "social_caption": "social", "mail_quote": "mail",
+    "social_caption": "social", "mail_quote": "mail", "mail_classify": "mail",
     "security_analyze": "security",
 }
 _TASK_PREFIX = (

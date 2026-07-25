@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Form, UploadFile, File
 from deps import *
 from services import *
+import proposal_gate
 
 router = APIRouter()
 
@@ -16,8 +17,10 @@ class ProposalCreate(BaseModel):
 @router.get("/api/proposals")
 def list_proposals(status: str = "pending"):
     conn = get_conn()
+    # Judged proposals first, best score on top; unscored ones follow (newest first)
     rows = conn.execute(
-        "SELECT * FROM proposals WHERE status=? ORDER BY created_at DESC", (status,)
+        "SELECT * FROM proposals WHERE status=? "
+        "ORDER BY (score IS NULL), score DESC, created_at DESC", (status,)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -88,6 +91,26 @@ def enhance_proposal_prompt(proposal_id: int):
         task="image_enhance",
     )
     return {"task_id": tid, "proposal_id": proposal_id}
+
+@router.post("/api/proposals/{proposal_id}/review")
+def review_proposal(proposal_id: int):
+    """LLM-judge ONE proposal: score 0-100 + verdict (reject|hold|approve), then
+    the gate acts per proposal_gate_mode (see proposal_gate.py).
+    Returns {task_id} for polling via /api/task/{task_id}."""
+    conn = get_conn()
+    row = conn.execute("SELECT id FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Proposal not found")
+    tid = proposal_gate.submit_review(proposal_id)
+    return {"task_id": tid, "proposal_id": proposal_id}
+
+@router.post("/api/proposals/review-all")
+def review_all_proposals():
+    """Batch-judge every pending, unscored proposal in ONE background LLM task.
+    Returns {task_id, queued} ({queued: 0} when nothing needs review, or
+    already_running: true when a batch is still in flight)."""
+    return proposal_gate.submit_review_all(priority=1)
 
 @router.patch("/api/proposals/{proposal_id}/reject")
 def reject_proposal(proposal_id: int):

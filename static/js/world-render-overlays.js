@@ -289,19 +289,39 @@ function _drawNodes(ctx) {
       ctx.strokeStyle = '#5b3a22'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x - 2, y - 5); ctx.lineTo(x - 6, y - 12); ctx.stroke();
       ctx.fillStyle = '#c2cad6'; ctx.fillRect(x - 9, y - 14, 6, 4);
     } else if (nd.kind === 'mine') {
+      // ORE DEPOSIT: rock face + minable ore BLOCKS, vein colour varied per node
+      // (copper/iron/gold) so each outcrop along the mountain fringe reads distinct.
+      const vein = ['#d08a4a', '#aeb4c0', '#e8c14a'][((nd.col || 0) + (nd.row || 0)) % 3];
       ctx.fillStyle = '#7c8493'; ctx.beginPath(); ctx.moveTo(x - 8, y + 4); ctx.lineTo(x - 3, y - 8); ctx.lineTo(x + 4, y - 6); ctx.lineTo(x + 9, y + 4); ctx.closePath(); ctx.fill();
       ctx.fillStyle = '#9aa3b2'; ctx.beginPath(); ctx.moveTo(x - 3, y - 8); ctx.lineTo(x + 4, y - 6); ctx.lineTo(x + 1, y - 1); ctx.closePath(); ctx.fill();
-      ctx.fillStyle = '#e8c14a'; ctx.fillRect(x - 4, y - 1, 2, 2); ctx.fillRect(x + 3, y + 1, 2, 2);
-      ctx.fillStyle = '#7fd4ff'; ctx.fillRect(x - 1, y - 5, 2, 2);
+      ctx.fillStyle = vein; ctx.fillRect(x - 4, y - 1, 2, 2); ctx.fillRect(x + 3, y + 1, 2, 2); ctx.fillRect(x - 1, y - 5, 2, 2);
+      ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.fillRect(x - 3.5, y - 0.5, 0.8, 0.8); ctx.fillRect(x - 0.5, y - 4.5, 0.8, 0.8);   // vein glints
+      for (const [ox, oy] of [[-11, 6], [9, 7]]) {                        // hewn ore blocks beside the face
+        ctx.fillStyle = '#666d7c'; ctx.fillRect(x + ox - 3, y + oy - 3, 6, 6);
+        ctx.fillStyle = '#7d8592'; ctx.fillRect(x + ox - 3, y + oy - 3, 6, 1.6);
+        ctx.fillStyle = vein; ctx.fillRect(x + ox - 1, y + oy - 1, 2, 2);
+      }
+      ctx.strokeStyle = '#5b3a22'; ctx.lineWidth = 1.4;                    // pick leaning on the rock
+      ctx.beginPath(); ctx.moveTo(x + 6, y + 2); ctx.lineTo(x + 11, y - 5); ctx.stroke();
+      ctx.fillStyle = '#c2cad6'; ctx.fillRect(x + 9, y - 8, 5, 3);
     } else if (nd.kind === 'farm') {
       ctx.fillStyle = '#6b4a2c'; ctx.fillRect(x - 9, y - 6, 18, 13);
       ctx.fillStyle = '#5a3d24'; for (let i = 0; i < 3; i++) ctx.fillRect(x - 9, y - 5 + i * 4, 18, 1);
       ctx.fillStyle = '#3ea355'; for (let i = 0; i < 4; i++) { const sx = x - 7 + i * 4; ctx.fillRect(sx, y - 3, 1, 3); ctx.fillRect(sx - 1, y - 4, 3, 1); }
     } else if (nd.kind === 'fish') {
-      ctx.fillStyle = '#6b4a2c'; ctx.fillRect(x - 1, y - 8, 3, 12);
-      ctx.fillStyle = '#8a6238'; ctx.fillRect(x - 4, y + 2, 8, 3);
-      ctx.strokeStyle = '#caa06a'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x + 1, y - 8); ctx.lineTo(x + 9, y - 12); ctx.stroke();
-      ctx.strokeStyle = 'rgba(210,238,255,.6)'; ctx.beginPath(); ctx.moveTo(x + 9, y - 12); ctx.lineTo(x + 10, y - 2); ctx.stroke();
+      // FISHING SPOT: jetty planks over the shoreline, rod rack + line, bait bucket, ripple
+      ctx.fillStyle = '#8a6238'; ctx.fillRect(x - 7, y + 1, 14, 4);                          // jetty planks
+      ctx.fillStyle = '#a9763f'; ctx.fillRect(x - 7, y + 1, 14, 1.2);
+      ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(x - 3, y + 1, 1, 4); ctx.fillRect(x + 2, y + 1, 1, 4);
+      ctx.fillStyle = '#6b4a2c'; ctx.fillRect(x - 1, y - 8, 3, 10);                          // rod rack post
+      ctx.strokeStyle = '#caa06a'; ctx.lineWidth = 1;                                        // two racked rods
+      ctx.beginPath(); ctx.moveTo(x + 1, y - 8); ctx.lineTo(x + 9, y - 13); ctx.moveTo(x, y - 7); ctx.lineTo(x - 8, y - 12); ctx.stroke();
+      ctx.strokeStyle = 'rgba(210,238,255,.6)'; ctx.beginPath(); ctx.moveTo(x + 9, y - 13); ctx.lineTo(x + 10, y - 2); ctx.stroke();
+      ctx.fillStyle = '#c0453a'; ctx.beginPath(); ctx.arc(x + 10, y - 1, 1.2, 0, 6.283); ctx.fill();   // bobber
+      ctx.strokeStyle = 'rgba(190,228,255,.5)'; ctx.lineWidth = 0.8;                          // ripple ring
+      ctx.beginPath(); ctx.ellipse(x + 10, y + 1, 3.5, 1.4, 0, 0, 6.283); ctx.stroke();
+      ctx.fillStyle = '#5b6c7c'; ctx.fillRect(x - 9, y - 4, 5, 5);                            // bait bucket
+      ctx.fillStyle = '#7d8f9f'; ctx.fillRect(x - 8, y - 3, 3, 1.5);
     } else if (nd.kind === 'build') {
       ctx.strokeStyle = '#8a6238'; ctx.lineWidth = 2; ctx.strokeRect(x - 8, y - 10, 16, 14);
       ctx.beginPath(); ctx.moveTo(x - 8, y - 10); ctx.lineTo(x + 8, y + 4); ctx.moveTo(x + 8, y - 10); ctx.lineTo(x - 8, y + 4); ctx.stroke();

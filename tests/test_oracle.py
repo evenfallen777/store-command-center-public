@@ -131,6 +131,67 @@ def test_oracle_settings_roundtrip(client):
     assert r.json()["ladder_days"] == [1, 3, 5, 7, 14]
 
 
+# ── predicted-asset config: crypto set is owner-editable, defaults unchanged ──
+def _clear_crypto_asset_setting():
+    conn = _conn()
+    conn.execute("DELETE FROM settings WHERE key='oracle_crypto_assets'")
+    conn.commit(); conn.close()
+
+
+def test_crypto_assets_default_to_the_five_majors(client):
+    from routers.oracle._base import crypto_ids, _assets
+    _clear_crypto_asset_setting()
+    assert crypto_ids() == {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+                            "XRP": "ripple", "DOGE": "dogecoin"}
+    assets = _assets()
+    assert assets[:5] == ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+
+def test_oracle_assets_endpoint_add_remove_crypto(client):
+    from routers.oracle._base import _assets
+    _clear_crypto_asset_setting()
+    r = client.get("/api/oracle/assets")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["crypto"] == {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+                           "XRP": "ripple", "DOGE": "dogecoin"}
+    assert "BTC" in d["assets"]
+
+    # add a new coin — requires a CoinGecko id, degrades cleanly (400) without one
+    assert client.post("/api/oracle/assets/crypto", json={"symbol": "KAS"}).status_code in (400, 422)
+    r = client.post("/api/oracle/assets/crypto", json={"symbol": "kas", "coingecko_id": "kaspa"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["crypto"]["KAS"] == "kaspa"
+    assert "KAS" in _assets(), "adding a crypto changes _assets()"
+
+    # remove a default — the tracked set shrinks accordingly
+    r = client.delete("/api/oracle/assets/crypto/DOGE")
+    assert r.status_code == 200
+    assert "DOGE" not in r.json()["crypto"]
+    assert "DOGE" not in _assets()
+    assert "KAS" in _assets()             # the earlier add persists
+
+    # can't remove a symbol that isn't tracked
+    assert client.delete("/api/oracle/assets/crypto/NOPE").status_code == 404
+
+    _clear_crypto_asset_setting()          # restore defaults for the rest of the suite
+
+
+def test_oracle_assets_stock_watchlist_still_works(client):
+    from routers.oracle._base import _assets
+    conn = _conn()
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('stocks_watchlist','AAPL,MSFT')")
+    conn.commit(); conn.close()
+    assets = _assets()
+    assert "AAPL" in assets and "MSFT" in assets
+    r = client.get("/api/oracle/assets")
+    assert set(r.json()["stocks"]) == {"AAPL", "MSFT"}
+    conn = _conn()
+    conn.execute("DELETE FROM settings WHERE key='stocks_watchlist'")
+    conn.commit(); conn.close()
+
+
 # ── consensus signal (advisory, accuracy-weighted, toggle-gated) ──────────────
 def test_consensus_endpoint_and_hookup_gate(client):
     _clear_predictions()

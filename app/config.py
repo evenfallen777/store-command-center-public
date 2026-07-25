@@ -23,6 +23,7 @@ DESIGNS_APPROVED = DATA_DIR / "designs/approved"
 DESIGNS_REJECTED = DATA_DIR / "designs/rejected"
 VIDEOS_DIR       = DATA_DIR / "videos"
 RESELL_UPLOADS   = BASE / "static" / "resell_uploads"   # served under /static, stays with code
+DOCEXTRACT_UPLOADS = BASE / "static" / "docextract_uploads"  # photo->fields captures (receipts, bills, …)
 DB_PATH          = DATA_DIR / "store.db"
 BACKUP_DIR       = DATA_DIR / "backups"
 ARCHIVE_DIR      = DATA_DIR / "archive"   # saved webpage snapshots (time machine)
@@ -118,6 +119,10 @@ OPENCLAW_AGENT = _env("STORE_OPENCLAW_AGENT", "agent_store")     # agent used fo
 # Public URL where this app is reachable from the internet (for OAuth callbacks).
 PUBLIC_BASE_URL   = _env("STORE_PUBLIC_URL", "http://localhost:8787")
 ETSY_REDIRECT_URI = _env("STORE_ETSY_REDIRECT_URI", f"{PUBLIC_BASE_URL}{STORE_BASE}/api/etsy/callback")
+YT_REDIRECT_URI   = _env("STORE_YT_REDIRECT_URI",   f"{PUBLIC_BASE_URL}{STORE_BASE}/api/social/youtube/callback")
+TIKTOK_REDIRECT_URI = _env("STORE_TIKTOK_REDIRECT_URI", f"{PUBLIC_BASE_URL}{STORE_BASE}/api/social/tiktok/callback")
+META_REDIRECT_URI = _env("STORE_META_REDIRECT_URI", f"{PUBLIC_BASE_URL}{STORE_BASE}/api/social/instagram/callback")
+GMAIL_REDIRECT_URI = _env("STORE_GMAIL_REDIRECT_URI", f"{PUBLIC_BASE_URL}{STORE_BASE}/api/mail/gmail/callback")
 
 # ── Network Security tab (Pi-hole scanner + live monitor) ────────────────────
 PIHOLE_API_HOST  = _env("STORE_PIHOLE_API_HOST", "localhost")   # where the Pi-hole API lives

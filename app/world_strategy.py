@@ -166,6 +166,22 @@ def _oracle_view(conn):
         return 0.0, ""
 
 
+def _with_ops_context(detail, topic=None):
+    """Ground a research/scout commission in the Bible's VERIFIED operational
+    notes (world_bible.ops_context) so the agents doing the work start from
+    real, checked facts about this system — where files live, what changed,
+    which tools exist — instead of guessing. Fail-soft: the detail is returned
+    unchanged when no verified notes exist or the Bible errs."""
+    try:
+        import world_bible
+        ops = world_bible.ops_context(topic=topic, limit=4)
+        if ops:
+            return f"{detail}\n\n[Verified system notes]\n{ops}"
+    except Exception:
+        logger.exception("ops context injection failed")
+    return detail
+
+
 def _spawn(conn, strat, plan):
     """Turn an adopted strategy into real actions. Returns count executed now
     (gated actions like code count as 'queued for your approval', not executed)."""
@@ -179,13 +195,17 @@ def _spawn(conn, strat, plan):
                                  args=(world_auto.pick_kind(), True), daemon=True).start()
                 executed += 1
             elif t == "research":
-                wo.pray("library_research", a.get("title", "Research for the Bible"),
-                        detail=a.get("detail", "Add findings to the company Bible."),
+                title = a.get("title", "Research for the Bible")
+                wo.pray("library_research", title,
+                        detail=_with_ops_context(
+                            a.get("detail", "Add findings to the company Bible."), title),
                         cost_cents=0, agent_name=proposer)
                 executed += 1
             elif t == "watch":
-                wo.pray("library_research", a.get("title", "Scout the market"),
-                        detail="Scout stocks / crypto / web trends for a survival edge.",
+                title = a.get("title", "Scout the market")
+                wo.pray("library_research", title,
+                        detail=_with_ops_context(
+                            "Scout stocks / crypto / web trends for a survival edge.", title),
                         cost_cents=0, agent_name=proposer)
                 executed += 1
             elif t == "affiliate":

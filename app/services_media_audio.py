@@ -137,7 +137,12 @@ def add_video_audio(vid_id: int, music_prompt: str, narration: str = ""):
     music_wav = str(VIDEOS_DIR / f"aud_{vid_id}_music_{ts}.wav")
     voice_wav = ""
     with _VIDEO_RUN_LOCK:
-        orch.video_acquire()
+        try:
+            orch.video_acquire()
+        except RuntimeError as ex:
+            # GPU could not be freed — fail clearly; failed acquire holds nothing.
+            _set_audio(vid_id, "failed", err=str(ex)[:500])
+            return
         try:
             dur = max(4, int(_video_duration(video)) + 1)
             _set_video_progress(vid_id, 15, "Composing music…")
@@ -209,7 +214,12 @@ def run_audio_clip(clip_id: int):
     ts = int(datetime.now().timestamp())
     out = str(VIDEOS_DIR / f"clip_{clip_id}_{ts}.wav")
     with _VIDEO_RUN_LOCK:
-        orch.video_acquire()
+        try:
+            orch.video_acquire()
+        except RuntimeError as ex:
+            # GPU could not be freed — fail clearly; failed acquire holds nothing.
+            _set_clip(clip_id, "failed", err=str(ex)[:500])
+            return
         try:
             _node_audio(mode, row["prompt"], out, duration=int(row["duration"] or 8),
                         model_id=model_id, engine=engine,

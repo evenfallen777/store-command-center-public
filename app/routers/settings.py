@@ -36,6 +36,33 @@ def get_settings():
     result.setdefault("nsfw_enabled", "")
     result.setdefault("nsfw_display", "")
     result.setdefault("nsfw_world", "")
+    # Donations (Buy Me a Coffee) — toggle default OFF, handle default blank, so a
+    # fresh public clone never ships someone else's donate link (see routers/donate.py).
+    result.setdefault("donate_enabled", "0")
+    result.setdefault("donate_bmc_user", "")
+    # Proposal review gate (LLM judge) — see proposal_gate.py for the semantics.
+    result.setdefault("proposal_gate_enabled", "0")
+    result.setdefault("proposal_gate_mode", "auto_weed")
+    result.setdefault("proposal_gate_reject_below", "40")
+    result.setdefault("proposal_gate_approve_above", "80")
+    result.setdefault("proposal_gate_interval_min", "360")
+    result.setdefault("proposal_gate_batch_size", "10")
+    # Mail auto-reply gate — see mail_gate.py for the semantics. Ships OFF, mode
+    # 'manual' (today's click-to-draft flow); full_auto is an explicit opt-in.
+    result.setdefault("mail_gate_enabled", "0")
+    result.setdefault("mail_gate_mode", "manual")
+    result.setdefault("mail_gate_confidence", "80")
+    result.setdefault("mail_gate_interval_min", "15")
+    result.setdefault("mail_gate_batch_size", "5")
+    result.setdefault("mail_gate_allow", "")
+    result.setdefault("mail_gate_deny", "")
+    # Proposal desk (multi-lane origination) + Etsy demand signal — see
+    # proposal_desk.py / etsy_signal.py for the semantics.
+    result.setdefault("proposal_desk_enabled", "0")
+    result.setdefault("proposal_desk_interval_min", "240")
+    result.setdefault("proposal_lanes_enabled", DEFAULT_LANES)
+    result.setdefault("etsy_signal_ttl_min", "360")
+    result.setdefault("etsy_signal_scrape_enabled", "0")
     # P&L (Etsy) fee-model defaults — tunable so the margin view isn't magic numbers.
     try:
         from pnl import PNL_FEE_DEFAULTS
@@ -43,6 +70,11 @@ def get_settings():
             result.setdefault(k, str(v))
     except Exception:
         pass
+    # The Cloudflare token (and account id) are WRITE-ONLY: the Integrations panel
+    # never re-displays them ("leave blank to keep the current one"), so drop them
+    # before the decrypt step — the token must never appear in any API response.
+    result.pop("cf_api_token", None)
+    result.pop("cf_account_id", None)
     return _dec_secrets(result)   # decrypt credentials so the UI shows the saved values
 
 

@@ -28,7 +28,7 @@ window.WHUD = (function () {
       dock: { left: 320, top: 46 }, w: 350, mh: '62%' },
     { key: 'company', icon: '🏢', label: 'Company',
       tip: 'Company progress — treasury & real-money budget, town hall, tech age, leaderboard and security posture.',
-      dock: { right: 10, bottom: 10 }, w: 340, mh: '42%' },
+      dock: { right: 10, bottom: 10 }, w: 340, mh: '42%', open: true },
   ];
   let _open = {}, _pos = {}, _root = null, _skillsMeta = null, _skillDetail = null;
   let _questsData = null, _questsAt = 0, _opsData = null, _opsAt = 0;
@@ -92,8 +92,9 @@ window.WHUD = (function () {
       <button class="whud-btn" id="world-think-btn" title="Provoke a thought — the selected agent (or a random one) thinks out loud via the LLM">💭</button>
       <button class="whud-btn" id="world-snd-btn" title="Sound mixer — ambient + effects react to the live world" onclick="worldSndPanel()">🔊</button>
       <button class="whud-btn" id="world-god-btn" title="Play God — edit the map: move buildings, place decor, drop agents onto work" onclick="worldToggleEdit()">🛠️</button>
+      <button class="whud-btn" id="world-hq-btn" title="HQ progression stages — era snapshots of the company HQ (view a prior age, advance with the tech tier)" onclick="worldHqPanel()">🏭</button>
       <button class="whud-btn" style="position:relative;background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd;font-weight:600"
-        title="God Console — Prayers · Workboard · Control · Republic · Finances · Settings, all in one place" onclick="worldConsole('god')">🏛️ God
+        title="${window.WTheme ? WTheme.pick('God Console', 'Owner Console') : 'God Console'} — Prayers · Workboard · Control · Republic · Finances · Settings, all in one place" onclick="worldConsole('god')">🏛️ ${window.WTheme ? WTheme.pick('God', 'Owner') : 'God'}
         <span id="world-god-badge" style="display:none;position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border-radius:10px;font-size:.62rem;font-weight:700;padding:1px 6px;min-width:16px;text-align:center"></span></button>
       <button class="whud-btn" title="Recenter — fit the whole city in view" onclick="worldRecenter()">⤢</button>
       <button class="whud-btn" id="world-fs-btn" title="Browser-fullscreen the game (Esc to exit)" onclick="worldFullscreen()">⛶</button>

@@ -86,6 +86,53 @@ function showChainBuilder() {
         </label>
       </div>
 
+      <div style="margin-bottom:16px;border-top:1px solid var(--border);padding-top:12px">
+        <label style="font-size:.85rem;color:var(--text);display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
+          <input type="checkbox" id="chain-audio-en" style="width:auto" onchange="document.getElementById('chain-audio-settings').style.display=this.checked?'block':'none'">
+          &#128266; Generate with audio ${hlp('After the chain compiles, a layered soundtrack is generated and mixed on: one background-music bed for the whole video, spoken narration (TTS) matched to each scene, and optional sound effects. Off = current behavior (silent video). You can also add audio later from the chain card.')}
+        </label>
+        <div id="chain-audio-settings" style="display:none;margin-top:10px;background:var(--surface2,#16161f);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="chain-aud-music" checked style="width:auto"> &#127925; Music bed</label>
+              <select id="chain-aud-music-engine" style="width:100%;margin-top:6px;padding:6px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem">
+                <option value="musicgen" selected>MusicGen (fast)</option>
+                <option value="musicgen_med">MusicGen Medium (richer)</option>
+                <option value="stable_audio">Stable Audio Open (hi-fi, needs HF token)</option>
+                <option value="acestep">ACE-Step (songs w/ vocals)</option>
+              </select>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="chain-aud-music-vol" min="0" max="1" step="0.02" value="0.28" style="width:100%"
+                  oninput="document.getElementById('chain-aud-music-vol-val').textContent=this.value">
+                <span id="chain-aud-music-vol-val">0.28</span></label>
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="chain-aud-voice" checked style="width:auto"> &#128483;&#65039; Narration (TTS)</label>
+              <select id="chain-aud-voice-engine" style="width:100%;margin-top:6px;padding:6px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem">
+                <option value="mms_tts" selected>MMS-TTS (voice narration)</option>
+              </select>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="chain-aud-voice-vol" min="0" max="1.5" step="0.05" value="1.0" style="width:100%"
+                  oninput="document.getElementById('chain-aud-voice-vol-val').textContent=this.value">
+                <span id="chain-aud-voice-vol-val">1.0</span></label>
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="chain-aud-sfx" style="width:auto"> &#128165; Sound effects</label>
+              <div style="font-size:.68rem;color:var(--muted);margin-top:6px">One short effect per scene, matched to its prompt (slower — one extra clip per scene).</div>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="chain-aud-sfx-vol" min="0" max="1.5" step="0.05" value="0.6" style="width:100%"
+                  oninput="document.getElementById('chain-aud-sfx-vol-val').textContent=this.value">
+                <span id="chain-aud-sfx-vol-val">0.6</span></label>
+            </div>
+          </div>
+          <input id="chain-aud-music-prompt" placeholder="Music vibe (optional — default: derived from the concept)" style="width:100%;margin-top:10px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box">
+          <textarea id="chain-aud-narration" rows="2" placeholder="Narration script (optional — empty = each scene's prompt is read at that scene's start)" style="width:100%;margin-top:6px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box;resize:vertical"></textarea>
+        </div>
+      </div>
+
       <div style="display:flex;gap:10px;justify-content:flex-end">
         <button onclick="closeChainModal()" style="padding:9px 22px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer">Cancel</button>
         <button id="chain-submit-btn" onclick="submitChain()" style="padding:9px 22px;background:#6c63ff;border:none;border-radius:8px;color:#fff;font-weight:600;cursor:pointer">&#128279; Generate Chain</button>
@@ -159,17 +206,24 @@ async function generateChainPrompts() {
     if (!r.ok) throw new Error(await r.text());
     const {task_id} = await r.json();
     // Poll for result
-    let prompts = null;
+    let prompts = null, result = null;
     for (let i = 0; i < 60; i++) {
       await new Promise(res => setTimeout(res, 2000));
       const pr = await fetch(`${API}/api/task/${task_id}`);
       const pt = await pr.json();
-      if (pt.status === 'done' && pt.result?.prompts) { prompts = pt.result.prompts; break; }
+      if (pt.status === 'done' && pt.result?.prompts) { prompts = pt.result.prompts; result = pt.result; break; }
       if (pt.status === 'failed') { toast('LLM failed to generate prompts', 'error'); break; }
     }
     if (prompts) {
       renderChainPromptRows(n, prompts);
-      toast(`Generated ${prompts.length} scene prompts!`);
+      // Same-pass matching audio: overall music vibe + per-segment narration
+      // lines (joined, one per line = the whole-chain voice-over script).
+      // _fillAudioIfEmpty (tab-videos.js) only fills fields the owner left
+      // empty; a prompts-only result (legacy parser fallback) changes nothing.
+      const gotMusic = _fillAudioIfEmpty('chain-aud-music-prompt', result?.music);
+      const narrs = (result?.narrations || []).map(x => String(x || '').trim()).filter(Boolean);
+      const gotVoice = narrs.length ? _fillAudioIfEmpty('chain-aud-narration', narrs.join('\n')) : false;
+      toast(`Generated ${prompts.length} scene prompts${gotMusic || gotVoice ? ' + matching audio' : ''}!`);
     } else {
       toast('Timeout waiting for prompts — try again', 'warn');
     }
@@ -195,6 +249,8 @@ async function submitChain() {
   const model_id = document.getElementById('chain-model').value;
   const strength = parseFloat(document.getElementById('chain-strength').value);
   const concept  = document.getElementById('chain-concept')?.value.trim() || '';
+  const audio_enabled = !!document.getElementById('chain-audio-en')?.checked;
+  const audio_settings = audio_enabled ? _chainAudioSettings() : null;
   const btn      = document.getElementById('chain-submit-btn');
   btn.disabled = true; btn.textContent = '\u23F3 Starting\u2026';
   try {
@@ -202,7 +258,8 @@ async function submitChain() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({concept, prompts, model_id, width: w, height: h,
-                            num_frames: frames, steps, strength})
+                            num_frames: frames, steps, strength,
+                            audio_enabled, audio_settings})
     });
     if (!r.ok) throw new Error(await r.text());
     const {chain_id} = await r.json();
@@ -215,6 +272,25 @@ async function submitChain() {
   }
 }
 
+/* Read the chain-builder audio panel into the audio_settings payload
+   (keys mirror the server's DEFAULT_CHAIN_AUDIO). */
+function _chainAudioSettings() {
+  const val = (id, d) => { const e = document.getElementById(id); return e ? e.value : d; };
+  const chk = id => !!document.getElementById(id)?.checked;
+  return {
+    music: chk('chain-aud-music'),
+    voice: chk('chain-aud-voice'),
+    sfx:   chk('chain-aud-sfx'),
+    music_volume: parseFloat(val('chain-aud-music-vol', '0.28')) || 0.28,
+    voice_volume: parseFloat(val('chain-aud-voice-vol', '1')) || 1.0,
+    sfx_volume:   parseFloat(val('chain-aud-sfx-vol', '0.6')) || 0.6,
+    music_engine: val('chain-aud-music-engine', 'musicgen') || 'musicgen',
+    voice_engine: val('chain-aud-voice-engine', 'mms_tts') || 'mms_tts',
+    music_prompt: (val('chain-aud-music-prompt', '') || '').trim(),
+    narration:    (val('chain-aud-narration', '') || '').trim(),
+  };
+}
+
 async function refreshChainGallery() {
   const el = document.getElementById('chain-gallery');
   if (!el) return;
@@ -222,11 +298,14 @@ async function refreshChainGallery() {
   let chains = [];
   try { chains = await api('/api/video-chains'); } catch { return; }
   if (!chains.length) { el.innerHTML = ''; return; }
-  const hasActive = chains.some(c => ['pending','generating'].includes(c.status));
-  el.innerHTML = `
+  const hasActive = chains.some(c => ['pending','generating'].includes(c.status)
+    || ['queued','generating'].includes(c.audio_status));
+  // setHTMLKeepMedia (tab-videos.js): keep per-player mute/volume/position
+  // across the poll re-render and never leak a detached player's audio.
+  setHTMLKeepMedia(el, `
     <div style="font-size:1rem;font-weight:700;margin:24px 0 12px">&#128279; Video Chains</div>
     <div style="display:flex;flex-direction:column;gap:16px">${chains.map(chainCard).join('')}</div>
-  `;
+  `);
   if (hasActive) _chainPollTimer = setTimeout(refreshChainGallery, 2500);
 }
 
@@ -249,13 +328,18 @@ function chainCard(c) {
     </div>
     <div style="font-size:.75rem;color:var(--muted)">Segment ${done}/${total} complete</div>` : '';
 
-  // Compiled video player
-  const compiledFilename = c.compiled_path ? c.compiled_path.split('/').pop() : null;
-  const compiledSrc      = compiledFilename ? `${API}/videos/${encodeURIComponent(compiledFilename)}` : null;
+  // Compiled video player — prefer the with-audio final over the silent compile.
+  // NOT muted: the whole point of chain audio is hearing it (playback is
+  // user-initiated, so no autoplay policy needs the muted attribute).
+  const playPath  = c.final_path || c.compiled_path;
+  const playName  = playPath ? playPath.split('/').pop() : null;
+  const compiledSrc = playName ? `${API}/videos/${encodeURIComponent(playName)}` : null;
+  const hasSound  = !!c.final_path && c.audio_status === 'done';
+  const audioLine = _chainAudioLine(c);
   const compiledPlayer   = compiledSrc ? `
     <div style="margin-top:12px">
-      <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">&#127902; Compiled video:</div>
-      <video controls loop muted preload="metadata" style="width:100%;border-radius:8px;background:#000;max-height:200px;display:block">
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">&#127902; Compiled video:${hasSound ? ' <span style="color:#22c55e">&#128266; with sound</span>' : ''}</div>
+      <video controls loop preload="metadata" style="width:100%;border-radius:8px;background:#000;max-height:200px;display:block">
         <source src="${compiledSrc}" type="video/mp4">
       </video>
       <a href="${compiledSrc}" download style="text-decoration:none">
@@ -282,6 +366,9 @@ function chainCard(c) {
   const compileBtn = c.status === 'done' && !compiledSrc
     ? `<button onclick="compileChain(${c.id})" title="Stitch all finished segments into one MP4 with crossfade transitions, ready to download." style="width:auto;padding:5px 14px;font-size:.8rem;background:#0ea5e9;color:#fff;border:none;border-radius:6px;cursor:pointer">&#127902; Compile Video</button>`
     : '';
+  const audioBtn = c.compiled_path && !['queued','generating'].includes(c.audio_status)
+    ? `<button onclick="chainAudio(${c.id})" title="Generate a layered soundtrack (music bed + TTS narration + optional SFX) and mix it onto the compiled video." style="width:auto;padding:5px 14px;font-size:.8rem;background:#a855f720;color:#a855f7;border:1px solid #a855f750;border-radius:6px;cursor:pointer">&#127925; ${c.audio_status === 'done' ? 'Redo audio' : 'Generate audio'}</button>`
+    : '';
   const cancelChainBtn = ['pending','generating'].includes(c.status)
     ? `<button onclick="cancelChain(${c.id})" style="width:auto;padding:5px 12px;font-size:.8rem;background:#f59e0b20;color:#f59e0b;border:1px solid #f59e0b50;border-radius:6px;cursor:pointer">&#9209;&#65039; Cancel</button>`
     : '';
@@ -301,16 +388,46 @@ function chainCard(c) {
       ${progressBar}
       ${c.error ? `<div style="font-size:.8rem;color:#ef4444;margin:8px 0">${esc(c.error)}</div>` : ''}
       ${compiledPlayer}
+      ${audioLine}
       <div style="margin-top:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
         ${segsHtml}
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        ${compileBtn}${cancelChainBtn}
+        ${compileBtn}${audioBtn}${cancelChainBtn}
         <button onclick="deleteChain(${c.id})" style="width:auto;padding:5px 12px;font-size:.8rem;background:#ef444420;color:#ef4444;border:1px solid #ef444450;border-radius:6px;cursor:pointer">&#128465; Delete Chain</button>
       </div>
       <div style="margin-top:5px;font-size:.73rem;color:var(--muted)">${created}</div>
     </div>`;
 }
+
+/* One-line chain-audio status under the player. */
+function _chainAudioLine(c) {
+  const a = c.audio_status;
+  if (a === 'queued' || a === 'generating') {
+    return `<div style="margin-top:6px;font-size:.76rem;color:#a855f7">&#127925; Generating soundtrack (music / narration / SFX)&hellip;</div>`;
+  }
+  if (a === 'failed') {
+    return `<div style="margin-top:6px;font-size:.74rem;color:var(--warn)">&#127925; Audio failed: ${esc(c.audio_error || 'unknown')}</div>`;
+  }
+  if (a === 'done' && c.audio_error) {   // partial-layer note (some layers failed)
+    return `<div style="margin-top:6px;font-size:.72rem;color:var(--muted)">&#127925; ${esc(c.audio_error)}</div>`;
+  }
+  return '';
+}
+
+/* Generate (or redo) the layered audio for a compiled chain. Empty body =
+   the server uses the chain's stored audio_settings (or the defaults). */
+async function chainAudio(id) {
+  try {
+    const r = await fetch(`${API}/api/video-chains/${id}/audio`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast('🎵 Generating chain soundtrack — music, narration & mix');
+    refreshChainGallery();
+  } catch (e) { toast('Chain audio failed: ' + e.message, 'error'); }
+}
+window.chainAudio = chainAudio;
 
 async function cancelChain(id) {
   if (!confirm('Cancel this chain? The current segment will be stopped.')) return;

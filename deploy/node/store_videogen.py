@@ -7,7 +7,8 @@ Supports modes:
   v2v  — video-to-video continuation from prev_video_path
 Usage: python3 store_videogen.py <args_json_file>
 Args JSON keys: prompt, output, width, height, frames, steps, seed, fps, model_id,
-                mode (t2v|v2v), prev_video_path (v2v only), strength (v2v, default 0.7)
+                mode (t2v|v2v), prev_video_path (v2v only), strength (v2v, default 0.7),
+                guidance (optional CFG override; omitted → the per-model default below)
 """
 import sys, json, os, time
 
@@ -72,6 +73,17 @@ def _resolve_cfg(model_id):
     return cfg
 
 
+def _guidance(args, cfg):
+    """CFG for this run: explicit per-request value (the Store's per-model tuning)
+    wins; otherwise the model family's default above — exactly the old behavior.
+    Not `or`-chained: 0.0 is a legitimate override (guidance off)."""
+    g = args.get("guidance")
+    try:
+        return float(g) if g is not None else cfg["guidance_scale"]
+    except (TypeError, ValueError):
+        return cfg["guidance_scale"]
+
+
 def load_frames(video_path):
     """Load all frames from a video as PIL Images."""
     import imageio
@@ -99,7 +111,7 @@ def generate_t2v(args):
 
     cfg            = _resolve_cfg(model_id)
     dtype_str      = cfg["dtype"]
-    guidance_scale = cfg["guidance_scale"]
+    guidance_scale = _guidance(args, cfg)
     pipeline_name  = cfg["t2v_pipeline"]
     use_neg        = cfg["use_negative_prompt"]
     dtype          = torch.bfloat16 if dtype_str == "bfloat16" else torch.float16
@@ -170,7 +182,7 @@ def generate_v2v(args):
 
     cfg            = _resolve_cfg(model_id)
     dtype_str      = cfg["dtype"]
-    guidance_scale = cfg["guidance_scale"]
+    guidance_scale = _guidance(args, cfg)
     pipeline_name  = cfg["v2v_pipeline"]
     use_neg        = cfg["use_negative_prompt"]
     dtype          = torch.bfloat16 if dtype_str == "bfloat16" else torch.float16
@@ -193,15 +205,32 @@ def generate_v2v(args):
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
     if pipeline_name == "WanVideoToVideoPipeline":
-        from diffusers import WanVideoToVideoPipeline
-        pipe = WanVideoToVideoPipeline.from_pretrained(model_id, torch_dtype=dtype)
+        from diffusers import AutoencoderKLWan, WanVideoToVideoPipeline
+        # WanVideoToVideoPipeline hardcodes the input video / initial latents to
+        # float32 before self.vae.encode() (pipeline_wan_video2video.py, "dtype=torch.float32"),
+        # so an fp16 VAE fails with "Input type (float) and bias type (c10::Half)".
+        # Upstream's documented usage is to load the VAE in float32 (see the
+        # pipeline's own docstring example); the transformer/text encoder stay fp16.
+        # Decode also works: the pipeline casts latents to self.vae.dtype.
+        # This survives enable_sequential_cpu_offload(), which moves modules
+        # between devices but never changes their dtype.
+        vae = AutoencoderKLWan.from_pretrained(
+            model_id, subfolder="vae", torch_dtype=torch.float32
+        )
+        pipe = WanVideoToVideoPipeline.from_pretrained(model_id, vae=vae, torch_dtype=dtype)
         print(f"[videogen] Loaded in {time.time()-t0:.1f}s — enabling CPU offload…", flush=True)
         pipe.enable_sequential_cpu_offload()
         pipe.enable_attention_slicing()
         print(f"[videogen] V2V generating {width}x{height} strength={strength} seed={seed} [{model_short}]", flush=True)
+        # height/width MUST be passed: without them WanVideoToVideoPipeline falls
+        # back to ITS defaults (832×480) regardless of the input frames' size, so
+        # any non-default chain got continuation segments at the model-native size
+        # and the compile had to letterbox them (the uniform-segment bug). For the
+        # default 832×480 chain this is a no-op.
         kwargs = dict(
             video=prev_frames,
             prompt=prompt,
+            height=height, width=width,
             strength=strength,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,

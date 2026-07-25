@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# generate_video_continuation.sh — generate V2V continuation video on RTX 3060 node.
+# Usage: generate_video_continuation.sh "prompt" prev_video_path [output] [width] [height]
+#                                        [frames] [steps] [seed] [fps] [model_id] [strength] [guidance]
+# prev_video_path: LOCAL path on gateway to the previous segment video.
+# guidance (optional): CFG override; empty/omitted → the model's built-in default.
+# Outputs: path to generated MP4 on stdout.
+
+set -euo pipefail
+
+PROMPT="${1:?usage: generate_video_continuation.sh <prompt> <prev_video_path> [output] ...}"
+PREV_VIDEO="${2:?prev_video_path required}"
+OUTPUT="${3:-/tmp/vid_cont_$(date +%s).mp4}"
+WIDTH="${4:-832}"
+HEIGHT="${5:-480}"
+FRAMES="${6:-49}"
+STEPS="${7:-20}"
+SEED="${8:-0}"
+FPS="${9:-16}"
+MODEL_ID="${10:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}"
+STRENGTH="${11:-0.7}"
+GUIDANCE="${12:-}"   # optional CFG; empty → model default on the node
+
+BOX="user@127.0.0.1"
+PYTHON=~/ComfyUI/venv/bin/python3
+REMOTE_SCRIPT="~/store_videogen.py"
+TIMEOUT=1800   # 30 min
+
+# Generate random seed if 0
+if [ "$SEED" = "0" ]; then
+  SEED=$(python3 -c "import random; print(random.randint(1, 2**31-1))")
+fi
+
+TMP_ARGS="/tmp/vid_cont_args_${SEED}_$$.json"
+REMOTE_PREV="/tmp/vid_prev_${SEED}_$$.mp4"
+TMP_OUT="/tmp/vid_cont_out_${SEED}_$(date +%s).mp4"
+
+# SCP previous video to node
+echo "[continuation] Copying previous segment to node…" >&2
+scp -q -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+  "$PREV_VIDEO" "${BOX}:${REMOTE_PREV}"
+
+# Build args JSON
+python3 - <<PYEOF > "$TMP_ARGS"
+import json
+d = {
+    "mode":           "v2v",
+    "prev_video_path": "$REMOTE_PREV",
+    "prompt":         """${PROMPT}""",
+    "output":         "$TMP_OUT",
+    "width":          $WIDTH,
+    "height":         $HEIGHT,
+    "frames":         $FRAMES,
+    "steps":          $STEPS,
+    "seed":           $SEED,
+    "fps":            $FPS,
+    "model_id":       "${MODEL_ID}",
+    "strength":       $STRENGTH,
+}
+g = """${GUIDANCE}""".strip()
+if g:
+    d["guidance"] = float(g)   # omitted key = model default (old store_videogen.py ignores it)
+print(json.dumps(d))
+PYEOF
+
+# SCP args to node
+scp -q -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 \
+  "$TMP_ARGS" "${BOX}:${TMP_ARGS}"
+rm -f "$TMP_ARGS"
+
+# Run generation on node (HF_HUB_OFFLINE skips network checks; expandable_segments fixes VRAM fragmentation)
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=60 "$BOX" \
+  "HF_HOME=${STORE_HF_VIDEO:-/media/user/SSD/models_video} HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True timeout $TIMEOUT $PYTHON $REMOTE_SCRIPT $TMP_ARGS"
+
+RC=$?
+
+# Cleanup prev video on node
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$BOX" \
+  "rm -f $TMP_ARGS $REMOTE_PREV" 2>/dev/null || true
+
+if [ $RC -ne 0 ]; then
+  ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$BOX" "rm -f $TMP_OUT" 2>/dev/null || true
+  echo "ERROR: V2V generation failed on node (rc=$RC)" >&2
+  exit 1
+fi
+
+# SCP result back
+mkdir -p "$(dirname "$OUTPUT")"
+scp -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=60 \
+  "${BOX}:${TMP_OUT}" "$OUTPUT"
+
+RC2=$?
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$BOX" "rm -f $TMP_OUT" 2>/dev/null || true
+
+if [ $RC2 -ne 0 ]; then
+  echo "ERROR: Failed to copy video from node" >&2
+  exit 1
+fi
+
+echo "$OUTPUT"

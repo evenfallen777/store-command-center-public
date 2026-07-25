@@ -10,6 +10,7 @@ player-legible control surface (the bandit survives as the optional "Auto" polic
 Columns are ordered left→right by default importance; the priority NUMBER dominates,
 column order only breaks ties (RimWorld §2.3). Storage: world_work_priority.
 """
+from deps import get_setting
 from world_defs import mget
 import world_skills as WS
 import world_tech as WT
@@ -39,6 +40,52 @@ def _ensure(c):
     c.execute("""CREATE TABLE IF NOT EXISTS world_work_priority(
         agent_key TEXT, work_type TEXT, priority INTEGER,
         PRIMARY KEY(agent_key, work_type))""")
+    # God-Panel WorkGiver directives: the OWNER pins a priority for a work type
+    # on a whole DEPARTMENT or a single AGENT. Overlaid on top of the normal
+    # priorities ONLY while world_workgiver_enabled is on (default OFF =
+    # behavior identical to before). Agent directives beat dept directives.
+    c.execute("""CREATE TABLE IF NOT EXISTS world_work_directives(
+        scope TEXT NOT NULL,               -- 'dept' | 'agent'
+        target TEXT NOT NULL,              -- dept key / agent_key
+        work_type TEXT NOT NULL,
+        priority INTEGER NOT NULL,         -- 0 = never … 4 = lowest
+        note TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY(scope, target, work_type))""")
+
+
+# ── God-Panel WorkGiver (owner work-priority directives; default OFF) ────────
+WORKGIVER_KEY = "world_workgiver_enabled"
+
+
+def workgiver_enabled():
+    return str(get_setting(WORKGIVER_KEY, "0")).lower() in ("1", "true", "yes", "on")
+
+
+def directives(c):
+    _ensure(c)
+    return [dict(r) for r in c.execute(
+        "SELECT scope, target, work_type, priority, note, created_at "
+        "FROM world_work_directives ORDER BY scope, target, work_type").fetchall()]
+
+
+def set_directive(c, scope, target, work_type, priority, note=None):
+    _ensure(c)
+    if scope not in ("dept", "agent") or work_type not in WORK_TYPES or not target:
+        return False
+    priority = max(0, min(4, int(priority)))
+    c.execute("""INSERT INTO world_work_directives(scope,target,work_type,priority,note)
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(scope,target,work_type) DO UPDATE SET priority=?, note=?""",
+              (scope, target, work_type, priority, note, priority, note))
+    return True
+
+
+def clear_directive(c, scope, target, work_type):
+    _ensure(c)
+    c.execute("DELETE FROM world_work_directives WHERE scope=? AND target=? AND work_type=?",
+              (scope, target, work_type))
+    return True
 
 
 # ── default priorities: real work first, then the agent's primary skill, then chores ──
@@ -62,7 +109,22 @@ def get_priorities(c, agent):
     _ensure(c)
     stored = {r[0]: int(r[1]) for r in c.execute(
         "SELECT work_type, priority FROM world_work_priority WHERE agent_key=?", (agent["key"],)).fetchall()}
-    return {wt: stored.get(wt, default_priority(agent, wt)) for wt in WORK_TYPES}
+    prio = {wt: stored.get(wt, default_priority(agent, wt)) for wt in WORK_TYPES}
+    # WorkGiver overlay — ONLY when the owner's master toggle is on (default
+    # OFF ⇒ exactly the pre-WorkGiver behavior). Dept directives apply first,
+    # then agent directives override them.
+    if workgiver_enabled():
+        try:
+            rows = c.execute(
+                "SELECT scope, work_type, priority FROM world_work_directives "
+                "WHERE (scope='dept' AND target=?) OR (scope='agent' AND target=?)",
+                (agent.get("dept") or "", agent["key"])).fetchall()
+            for r in sorted(rows, key=lambda r: r["scope"] != "dept"):   # dept first, agent wins
+                if r["work_type"] in prio:
+                    prio[r["work_type"]] = max(0, min(4, int(r["priority"])))
+        except Exception:
+            pass
+    return prio
 
 
 def set_priority(c, agent_key, work_type, priority):
@@ -76,8 +138,42 @@ def set_priority(c, agent_key, work_type, priority):
 
 # ── WorkGivers: is there an available job of this type for this agent, right now? ──
 def _wg_operate(c, agent, ctx):
+    dept = agent.get("dept") or "trends"
+    if dept == "netsec":
+        # NON-COMBAT remediation: the netsec desk works its own low/med backlog on
+        # the normal cadence instead of waiting on a raid (world_security fix for
+        # the queue-starvation bug — raids fire rarely and only clear 4/raid LIFO).
+        try:
+            import world_security
+            n = world_security.remediate_backlog(c, agent)
+            if n:
+                return {"work_type": "operate", "state": "working", "location": "desk:netsec",
+                        "goal": f"patching {n} low/med finding(s)", "skill": None}
+        except Exception:
+            pass
+    # CONTENT DEPTS (social / image / video / audio / 3D): "operating" means
+    # actually MAKING something. Draw one enabled dept-appropriate capability
+    # from the catalog (world_caps.agent_work — gated on world_caps_auto + the
+    # per-cap gates, active hours, and throttled to one product in flight on
+    # the single GPU) → a real generation / draft post / storyboard / mesh.
+    # This kills the idle-desk bug: no more social "on the clock" with nothing
+    # completing, no more visuals "working" over an empty queue.
+    try:
+        import world_caps
+        if dept in world_caps.DEPT_CAPS:
+            job = world_caps.agent_work(c, agent)
+            if job:
+                return {"work_type": "operate", "state": "working", "location": f"desk:{dept}",
+                        "goal": job["goal"], "skill": None}
+            if ctx.get("has_work"):
+                # something REAL is in flight for this dept (queued render, a
+                # fresh draft in its window) — tending it is honest desk work.
+                return {"work_type": "operate", "state": "working", "location": f"desk:{dept}",
+                        "goal": f"tending the {dept} queue", "skill": None}
+            return None       # gated/throttled + empty queue → next priority, not fake work
+    except Exception:
+        pass
     if ctx.get("has_work"):
-        dept = agent.get("dept") or "trends"
         return {"work_type": "operate", "state": "working", "location": f"desk:{dept}", "goal": "on the clock", "skill": None}
     return None
 

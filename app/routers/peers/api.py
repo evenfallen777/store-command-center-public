@@ -52,7 +52,7 @@ def create_invite(body: InviteIn = None):
     conn.close()
     return {"ok": True, "invite_key": key,
             "note": "Give this to your friend (once). They paste it in THEIR "
-                    "Settings → Peers → Connect, along with this install's URL."}
+                    "Crypto → JellyCoin → Peers → Connect, along with this install's URL."}
 
 
 class ConnectIn(BaseModel):
@@ -154,7 +154,7 @@ def revoke_peer(pid: int):
 
 @router.get("/api/peers/connection-info")
 def connection_info():
-    """What YOUR friend needs to reach this node — shown in Settings → Peers."""
+    """What YOUR friend needs to reach this node — shown in Crypto → JellyCoin → Peers."""
     import socket
     from config import PORT
     lan_ip = ""

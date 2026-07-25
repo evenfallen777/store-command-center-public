@@ -59,7 +59,7 @@ def rpc_pair(body: PairIn):
     logger.info(f"peer pair request from '{body.name}' — pending approval (peer #{pid})")
     return {"ok": True, "key": key_we_accept, "name": _my_name(),
             "note": "Pending approval on this side — ask your friend to approve you "
-                    "in their Settings → Peers."}
+                    "in their Crypto → JellyCoin → Peers."}
 
 
 def _my_llm_models():
@@ -135,7 +135,7 @@ class RpcReviewIn(BaseModel):
 @router.post("/api/peers/rpc/review", include_in_schema=False)
 def rpc_review(body: RpcReviewIn, request: Request):
     """A peer asks THIS node to review a diff: our local LLM reviews it through the
-    unified queue, and our human can add a vote from Settings → Peers."""
+    unified queue, and our human can add a vote from Crypto → JellyCoin → Peers."""
     peer = _peer_from_key(request)
     if not peer["accept_reviews"]:
         raise HTTPException(403, "This node is not accepting review requests from you.")

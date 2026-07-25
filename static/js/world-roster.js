@@ -22,8 +22,8 @@ function worldRosterSort(key) {
 }
 const _rMood = m => m < 35 ? '#ef4444' : m < 55 ? '#f0b45a' : '#6ee7a8';
 
-function worldRoster() {
-  const st = _worldState;
+async function worldRoster() {
+  const st = await _ensureWorldState();
   if (!st) { toast?.('World not loaded yet'); return; }
   const ags = (st.agents || []).filter(a => a.kind === 'worker' || a.kind === 'openclaw');
   const { key, dir } = _rosterSort;
@@ -64,8 +64,8 @@ async function worldSetResearch(key) {
 }
 const _RES_BADGE = { done: ['#3fae6a', '✓ done'], active: ['#e0b050', 'researching'],
                      available: ['#4a90d9', 'ready'], locked: ['#7a86a0', '🔒 locked'] };
-function worldResearch() {
-  const st = _worldState;
+async function worldResearch() {
+  const st = await _ensureWorldState();
   if (!st) { toast?.('World not loaded yet'); return; }
   const r = (st.company || {}).research || { projects: [] };
   const cards = (r.projects || []).map(p => {
@@ -103,8 +103,8 @@ async function worldSchedAll(band) {
     await _pollWorld(); worldSchedule();
   } catch (e) { toast?.(e.message); }
 }
-function worldSchedule() {
-  const st = _worldState;
+async function worldSchedule() {
+  const st = await _ensureWorldState();
   if (!st) { toast?.('World not loaded yet'); return; }
   const s = (st.company || {}).schedule || {};
   const sched = s.schedule || [], meta = s.meta || {}, nowH = s.hour;

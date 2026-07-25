@@ -4,6 +4,7 @@ from the Store UI — with a live log and an OS gate that requires Ubuntu."""
 from fastapi import APIRouter, HTTPException
 from deps import *
 import subprocess, re as _re, json as _json
+import socket as _socket, time as _time
 
 router = APIRouter()
 
@@ -11,6 +12,34 @@ _BUNDLE   = BASE / "deploy" / "node"
 _REMOTE   = ".store-node-deploy"
 _LOGFILE  = "store-node-deploy.log"
 _ANSI     = _re.compile(r"\x1b\[[0-9;]*m")
+
+# ── cheap reachability ping ──
+# node_status() below does a full SSH session (uname + a bash status script) —
+# too heavy to poll globally every 20-30s from every open tab. This is a plain
+# TCP connect to gpu_host:22 with a short timeout, cached for _PING_TTL seconds
+# so any number of pollers cost at most one real probe per TTL window.
+_PING_TTL     = 25  # seconds
+_PING_TIMEOUT = 2.0  # seconds
+_ping_cache = {"reachable": False, "checked_at": 0, "host": None}
+
+
+@router.get("/api/node/ping")
+def node_ping():
+    """Fast reachability check for the GPU node — TCP connect to gpu_host:22,
+    ~2s timeout, cached ~25s. Never raises; unreachable/any error → reachable:false.
+    Use this for frequent/global polling; use /api/node/status for full detail."""
+    host = GPU_HOST
+    now = _time.time()
+    if _ping_cache["host"] == host and (now - _ping_cache["checked_at"]) < _PING_TTL:
+        return dict(_ping_cache)
+    reachable = False
+    try:
+        with _socket.create_connection((host, 22), timeout=_PING_TIMEOUT):
+            reachable = True
+    except Exception:
+        reachable = False
+    _ping_cache.update({"reachable": reachable, "checked_at": int(now), "host": host})
+    return dict(_ping_cache)
 
 
 def _target():

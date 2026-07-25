@@ -23,7 +23,6 @@ DEFAULTS = {
     "world_allow_free":       "0",      # agents may NOT make things free
     "world_min_price_cents":  "500",    # store product price floor ($5.00)
     "world_max_discount_pct": "40",     # no unrealistic fire-sales
-    "world_require_review":   "1",      # nothing auto-posts without review (no AI-junk dumps)
     # the world-builder's "eyes" — a vision model reviews each generated sprite and
     # keeps the best of N (and retries if poor). See world_vision.VISION_MODELS.
     "world_vision_enabled":   "1",
@@ -142,7 +141,7 @@ INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_raid_min_gap_min",
             "world_era_advance_min", "world_era_decay_min"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
-             "world_allow_free", "world_require_review", "world_vision_enabled",
+             "world_allow_free", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
              "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled",
              "world_floor_image_enabled", "world_layout_autosave",

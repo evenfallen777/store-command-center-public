@@ -20,9 +20,9 @@ const _RL_STATUS = {
   cancelled: ['#8899bb', '🚫 cancelled'],
 };
 
-async function renderResearch() {
+async function renderResearch(mount = 'main-content') {
   clearTimeout(_rlTimer);
-  const main = document.getElementById('main-content');
+  const main = document.getElementById(mount);
   main.innerHTML = `
     <div class="view-header">
       <div>

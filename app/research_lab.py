@@ -333,6 +333,29 @@ from research_lab_media import (  # noqa: E402,F401
 
 
 # ── the pipeline ──────────────────────────────────────────────────────────────
+def _remember_research(pid, project, md):
+    """Best-effort: stage a research finding into shared memory (Knowledge -> Memory for the
+    owner to promote). Never raises into the pipeline."""
+    try:
+        import httpx
+        try:
+            title = project["title"]
+        except Exception:
+            title = ""
+        summary = ""
+        for line in (md or "").splitlines():
+            t = line.strip().lstrip("#").strip()
+            if t and not t.startswith("!") and len(t) > 30:
+                summary = t
+                break
+        text = f"Research finding: {title}." + (f" {summary[:400]}" if summary else "") + f" (research #{pid})"
+        httpx.post("http://127.0.0.1:8787/api/knowledge/remember",
+                   json={"text": text[:1500], "agent": "research-lab", "tags": "research", "confidence": 0.6},
+                   timeout=15)
+    except Exception:
+        pass
+
+
 def _run_pipeline(pid: int):
     try:
         p = _get(pid)
@@ -469,6 +492,7 @@ def _run_pipeline(pid: int):
              library_path=lib_path, phase_note="report ready",
              completed_at=datetime.now().isoformat(timespec="seconds"))
         _ev(pid, "done", f"research complete — {len(notes)} sources read, {len(images)} images")
+        _remember_research(pid, p, md)   # stage a finding for owner review
         # 7) MARKET — price baseline + materials → Money tab (research_lab_market)
         try:
             import research_lab_market

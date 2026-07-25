@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from deps import *          # get_conn, orch, logger, _call_lmstudio
 from services import *      # (kept consistent with sibling routers)
 
-from ._base import router, CRYPTO_IDS, _meta_get, _meta_set, _assets, _price, _searx, ladder_days
+from ._base import router, crypto_ids, _meta_get, _meta_set, _assets, _price, _searx, ladder_days
 
 
 def _parse_json(raw: str) -> Optional[dict]:
@@ -216,18 +216,30 @@ def _run_round(n_assets: int):
                     _round["done"] += 1
                     _rlog(f"{ag['name']} · {a}: no valid forecast")
                     continue
-                market = "crypto" if a in CRYPTO_IDS else "stock"
+                market = "crypto" if a in crypto_ids() else "stock"
                 batch = _uuid.uuid4().hex[:12]     # groups this ladder's rungs
                 c = get_conn()
                 for r in d["rungs"]:
                     resolve_at = (datetime.now() + timedelta(days=r["days"])).isoformat(timespec="seconds")
+                    # DUALITY: every rung carries a high/low/expected band —
+                    # ✝️ best case / 😈 worst case / calibrated middle. Degrades
+                    # to the single-sided value while a lieutenant is off, and
+                    # to NULL if the helper is unavailable. Informational only:
+                    # the rung's own target/confidence and scoring are untouched.
+                    band = None
+                    try:
+                        import world_duality
+                        b = world_duality.forecast_band(prices[a], r["target_price"], r["confidence"])
+                        band = _json.dumps(b) if b else None
+                    except Exception:
+                        band = None
                     c.execute(
                         "INSERT INTO oracle_predictions (agent_id,agent_name,market,asset,current_value,"
-                        "direction,target_value,horizon_days,resolve_at,confidence,thesis,sources,status,batch_id) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?)",
+                        "direction,target_value,horizon_days,resolve_at,confidence,thesis,sources,status,batch_id,band) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?)",
                         (ag["id"], ag["name"], market, a, prices[a], r["direction"], r["target_price"],
                          r["days"], resolve_at, r["confidence"], d["thesis"],
-                         _json.dumps(research[a][:3]), batch))
+                         _json.dumps(research[a][:3]), batch, band))
                 c.commit(); c.close()
                 _round["made"] += len(d["rungs"])
                 _round["done"] += 1

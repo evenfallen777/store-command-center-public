@@ -12,8 +12,17 @@ payment history, this tracks the two other halves of a real personal ledger:
                  deliberately has no bill_id: double-entering a bill here would
                  double-count it in every total. The UI says so out loud.
 
+Income Phase 1 generalized `paychecks` into any-kind income, additively: the
+table gained income_type/currency/amount_native/external_source/external_txn_id/
+voided columns (db_schema.py), /api/ledger/paychecks is untouched byte-for-byte,
+and /api/ledger/income is the new superset (GET all types + per-type totals,
+POST/PATCH/DELETE a manual entry). Phase 1 writes external_source='manual' only.
+Phase 2 (app/income_import.py + income_sources.py in this package) adds the
+READ-ONLY PayPal/Printify/on-chain importers, which write rows here with
+external_source=paypal|printify|onchain and dedupe on external_txn_id.
+
 Summary/series therefore treat outgoings as `purchases + bill_payments`, two
-disjoint sets, and net as `income − outgoings`.
+disjoint sets, and net as `income − outgoings`; income sums exclude voided rows.
 
 Same conventions as bills.py throughout: integer cents everywhere, free-text
 categories (shared vocabulary with bills), an `extra` JSON object of arbitrary
@@ -266,6 +275,197 @@ def delete_paycheck(pid: int):
         conn.close()
 
 
+# ══ INCOME (Income Phase 1) ══════════════════════════════════════════════════
+# `paychecks` generalized ADDITIVELY into any-kind income — same table, same row
+# shape, plus income_type/currency/amount_native/external_source/external_txn_id/
+# voided (see db_schema.py create_ledger_tables migrations). /api/ledger/paychecks
+# above is untouched, byte-for-byte back-compat; this is the superset view + a
+# manual-entry endpoint for non-paycheck income (sale, refund, gift, dividend, …).
+#
+# The endpoints below are manual entry ONLY — no external API calls. Every row
+# created here writes external_source='manual', external_txn_id=NULL. The Phase 2
+# READ-ONLY importers (app/income_import.py, routes in income_sources.py) are the
+# only writers of external_source=paypal|printify|onchain rows, deduped by the
+# UNIQUE (external_source, external_txn_id) index.
+INCOME_TYPES = ("paycheck", "sale", "refund", "gift", "dividend", "interest",
+                "crypto_receive", "payout", "other")
+
+
+def _valid_income_type(t: str) -> bool:
+    return t in INCOME_TYPES
+
+
+class IncomeIn(BaseModel):
+    source: str                                  # payer / employer / marketplace / client
+    income_type: str = "paycheck"
+    amount_cents: Optional[int] = None           # USD-at-receipt; auto-filled from hours × rate
+    gross_cents: Optional[int] = None
+    received_at: Optional[str] = None            # YYYY-MM-DD, default today
+    hours: Optional[float] = None
+    hourly_rate_cents: Optional[int] = None
+    cycle: str = "irregular"
+    currency: str = "USD"                        # display currency; amount_cents is always USD
+    amount_native: Optional[float] = None         # coin/share amount when currency != USD
+    notes: str = ""
+    extra: Optional[dict] = None
+
+
+def _get_income(conn, iid: int):
+    row = conn.execute("SELECT * FROM paychecks WHERE id=?", (iid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "income entry not found")
+    return row
+
+
+def _norm_currency(v) -> str:
+    return (str(v or "USD").strip().upper()[:10]) or "USD"
+
+
+def _native(v):
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "amount_native must be a number")
+
+
+@router.get("/api/ledger/income")
+def list_income(limit: int = 500, type: Optional[str] = None):
+    """Every income row (all income_types), newest first, with a per-type
+    breakdown alongside the same month/YTD totals /api/ledger/paychecks shows.
+    Voided rows still appear in the list (so they can be reviewed/un-voided) but
+    are excluded from every total, exactly like the shared summary/series."""
+    limit = max(1, min(2000, int(limit)))
+    if type is not None and not _valid_income_type(type):
+        raise HTTPException(400, f"bad type {type!r} — {'|'.join(INCOME_TYPES)}")
+    today = date.today().isoformat()
+    conn = get_conn()
+    try:
+        where, args = "", []
+        if type:
+            where, args = "WHERE income_type=?", [type]
+        rows = conn.execute(
+            f"SELECT * FROM paychecks {where} ORDER BY received_at DESC, id DESC LIMIT ?",
+            (*args, limit)).fetchall()
+        by_type = conn.execute(
+            "SELECT COALESCE(NULLIF(income_type,''),'paycheck') AS income_type, "
+            "COALESCE(SUM(amount_cents),0) AS total_cents, COUNT(*) AS count "
+            "FROM paychecks WHERE voided=0 GROUP BY income_type ORDER BY total_cents DESC"
+        ).fetchall()
+        month = conn.execute("SELECT COALESCE(SUM(amount_cents),0), COUNT(*) FROM paychecks "
+                             "WHERE substr(received_at,1,7)=? AND voided=0", (today[:7],)).fetchone()
+        ytd = conn.execute("SELECT COALESCE(SUM(amount_cents),0), COUNT(*) FROM paychecks "
+                           "WHERE substr(received_at,1,4)=? AND voided=0", (today[:4],)).fetchone()
+        sources = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source FROM paychecks WHERE source<>'' ORDER BY source").fetchall()]
+        return {"income": [_row(r) for r in rows], "types": list(INCOME_TYPES),
+                "by_type": [dict(r) for r in by_type], "sources": sources,
+                "month_cents": month[0], "month_count": month[1],
+                "ytd_cents": ytd[0], "ytd_count": ytd[1], "today": today}
+    finally:
+        conn.close()
+
+
+@router.post("/api/ledger/income")
+def create_income(p: IncomeIn):
+    source = (p.source or "").strip()
+    if not source:
+        raise HTTPException(400, "source required")
+    itype = p.income_type or "paycheck"
+    if not _valid_income_type(itype):
+        raise HTTPException(400, f"bad type {itype!r} — {'|'.join(INCOME_TYPES)}")
+    if not _valid_cycle(p.cycle or "irregular"):
+        raise HTTPException(400, f"bad cycle {p.cycle!r} — {'|'.join(PAY_CYCLES)}")
+    hours = _hours(p.hours)
+    rate = _cents(p.hourly_rate_cents, "hourly_rate_cents")
+    amount = derive_amount_cents(_cents(p.amount_cents), hours, rate)
+    if amount is None:
+        raise HTTPException(400, "amount_cents required (or give both hours and hourly_rate_cents)")
+    received = _norm_date(p.received_at) or date.today().isoformat()
+    currency = _norm_currency(p.currency)
+    native = _native(p.amount_native)
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO paychecks (source,amount_cents,gross_cents,received_at,hours,"
+            "hourly_rate_cents,cycle,notes,extra,income_type,currency,amount_native,"
+            "external_source,external_txn_id,voided) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+            (source, amount, _cents(p.gross_cents, "gross_cents"), received, hours, rate,
+             p.cycle or "irregular", (p.notes or "").strip(), _norm_extra(p.extra),
+             itype, currency, native, "manual", None))
+        conn.commit()
+        return _row(_get_income(conn, cur.lastrowid))
+    finally:
+        conn.close()
+
+
+_INCOME_PATCHABLE = _PAY_PATCHABLE | {"income_type", "currency", "amount_native", "voided"}
+
+
+@router.patch("/api/ledger/income/{iid}")
+def update_income(iid: int, data: dict = Body(...)):
+    fields = {k: v for k, v in (data or {}).items() if k in _INCOME_PATCHABLE}
+    if not fields:
+        raise HTTPException(400, "nothing to update")
+    conn = get_conn()
+    try:
+        row = _get_income(conn, iid)
+        if "cycle" in fields and not _valid_cycle(fields["cycle"]):
+            raise HTTPException(400, f"bad cycle {fields['cycle']!r} — {'|'.join(PAY_CYCLES)}")
+        if "income_type" in fields and not _valid_income_type(fields["income_type"]):
+            raise HTTPException(400, f"bad type {fields['income_type']!r} — {'|'.join(INCOME_TYPES)}")
+        if "source" in fields:
+            fields["source"] = str(fields["source"]).strip()
+            if not fields["source"]:
+                raise HTTPException(400, "source required")
+        if "received_at" in fields:
+            fields["received_at"] = _norm_date(fields["received_at"]) or row["received_at"]
+        if "extra" in fields:
+            fields["extra"] = _norm_extra(fields["extra"])
+        if "hours" in fields:
+            fields["hours"] = _hours(fields["hours"])
+        if "hourly_rate_cents" in fields:
+            fields["hourly_rate_cents"] = _cents(fields["hourly_rate_cents"], "hourly_rate_cents")
+        if "gross_cents" in fields:
+            fields["gross_cents"] = _cents(fields["gross_cents"], "gross_cents")
+        if "amount_cents" in fields:
+            fields["amount_cents"] = _cents(fields["amount_cents"])
+        if "amount_native" in fields:
+            fields["amount_native"] = _native(fields["amount_native"])
+        if "currency" in fields:
+            fields["currency"] = _norm_currency(fields["currency"])
+        if "voided" in fields:
+            fields["voided"] = 1 if fields["voided"] in (1, True, "1", "true", "True") else 0
+        # Re-derive the amount when hours/rate moved and no explicit amount came with them.
+        if "amount_cents" not in fields and ("hours" in fields or "hourly_rate_cents" in fields):
+            h = fields.get("hours", row["hours"])
+            r = fields.get("hourly_rate_cents", row["hourly_rate_cents"])
+            derived = derive_amount_cents(None, h, r)
+            if derived is not None:
+                fields["amount_cents"] = derived
+        if fields.get("amount_cents", row["amount_cents"]) is None:
+            raise HTTPException(400, "amount_cents required (or give both hours and hourly_rate_cents)")
+        sets = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE paychecks SET {sets} WHERE id=?", (*fields.values(), iid))
+        conn.commit()
+        return _row(_get_income(conn, iid))
+    finally:
+        conn.close()
+
+
+@router.delete("/api/ledger/income/{iid}")
+def delete_income(iid: int):
+    conn = get_conn()
+    try:
+        _get_income(conn, iid)
+        conn.execute("DELETE FROM paychecks WHERE id=?", (iid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 # ══ PURCHASES ════════════════════════════════════════════════════════════════
 class PurchaseIn(BaseModel):
     merchant: str
@@ -459,10 +659,10 @@ def delete_purchase(pid: int):
 
 
 # ══ SUMMARY / SERIES ═════════════════════════════════════════════════════════
-def _bucket(conn, table, date_col, key_len, key):
+def _bucket(conn, table, date_col, key_len, key, extra_where=""):
     return conn.execute(
         f"SELECT COALESCE(SUM(amount_cents),0), COUNT(*) FROM {table} "
-        f"WHERE substr({date_col},1,{key_len})=?", (key,)).fetchone()
+        f"WHERE substr({date_col},1,{key_len})=?{extra_where}", (key,)).fetchone()
 
 
 @router.get("/api/ledger/summary")
@@ -481,7 +681,9 @@ def ledger_summary():
         # month_key/year — do not reuse "month" for the YYYY-MM string.
         out = {"today": today, "month_key": today[:7], "year": today[:4]}
         for scope, key, klen in (("month", today[:7], 7), ("ytd", today[:4], 4)):
-            inc = _bucket(conn, "paychecks", "received_at", klen, key)
+            # voided=0: future importer-written rows can be voided (dup/refund-undo)
+            # without skewing the totals every other scope depends on.
+            inc = _bucket(conn, "paychecks", "received_at", klen, key, " AND voided=0")
             pur = _bucket(conn, "purchases", "purchased_at", klen, key)
             bil = _bucket(conn, "bill_payments", "paid_at", klen, key)
             outgo = pur[0] + bil[0]
@@ -518,9 +720,10 @@ def ledger_series(months: int = 12):
         for table, col, dest in (("paychecks", "received_at", income),
                                  ("purchases", "purchased_at", purchases),
                                  ("bill_payments", "paid_at", bills)):
+            extra = " AND voided=0" if table == "paychecks" else ""
             for r in conn.execute(
                     f"SELECT substr({col},1,7) AS ym, SUM(amount_cents) AS total FROM {table} "
-                    f"WHERE substr({col},1,7) >= ? GROUP BY ym", (keys[0],)).fetchall():
+                    f"WHERE substr({col},1,7) >= ?{extra} GROUP BY ym", (keys[0],)).fetchall():
                 i = idx.get(r["ym"])
                 if i is not None:
                     dest[i] += r["total"] or 0

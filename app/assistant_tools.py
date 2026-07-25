@@ -111,6 +111,8 @@ def classify_call(method: str, path: str) -> str:
         return "swarm"
     if re.match(r"^/api/(generate|videos|video-chains|audio|models3d|enhance-prompt|collection|ai)", p):
         return "studio"
+    if re.search(r"^/api/knowledge/notes/\d+/(promote|reject)", p):
+        return "settings"   # shared-memory gate — owner review, not agent auto-promote
     return "other"
 
 
@@ -237,6 +239,17 @@ CURATED = [
      "desc": "Read current store settings (read-only)."},
     {"name": "graph_query",     "method": "POST", "path": "/api/graph/query",
      "desc": "Ask the codebase knowledge graph a question. Args: q (the question)."},
+    {"name": "knowledge_search", "method": "GET", "path": "/api/knowledge/search",
+     "desc": "Federated search across the Library, Research reports AND the codebase "
+             "Knowledge Graph in ONE call. Args: q (question/keywords), scope (all|code|research). "
+             "The default way to pull context/memory before answering or coding."},
+    {"name": "livedocs_lookup", "method": "GET", "path": "/api/livedocs/lookup",
+     "desc": "Fetch CURRENT docs for a named software library (context7). "
+             "Args: library (e.g. fastapi), topic (optional). Use before coding against a library."},
+    {"name": "knowledge_remember", "method": "POST", "path": "/api/knowledge/remember",
+     "desc": "Record a fact you learned into SHARED memory (staged for owner review before it "
+             "becomes searchable). Args: text (the fact), agent (who), tags, confidence. Use for "
+             "durable findings worth keeping across sessions."},
 ]
 _CURATED_BY_NAME = {t["name"]: t for t in CURATED}
 

@@ -8,12 +8,47 @@ it), which is exactly what keeps it OUT of every regular listing surface and IN
 /api/nsfw/library only. The safety floor (app/nsfw.py) screens every prompt
 before anything is written — it is not toggleable.
 """
+import re as _re
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from deps import *
 import services as _svc
 import nsfw as core
 
 router = APIRouter()
+
+# Reasoning models (e.g. qwen3.5-*-uncensored-aggressive) ignore reasoning_effort:none
+# and emit a plain-text chain-of-thought as their answer instead of the prompt. That CoT
+# (a) isn't the prompt and (b) quotes the safety rules ("no minors…"), which then
+# false-trips the OUTPUT safety filter → empty result → UI shows the input unchanged.
+# Strip any reasoning and keep only the final prompt line, whatever model is selected.
+_COT_MARK    = _re.compile(r"(?im)^\s*(thinking process|analy[sz]e the request|reasoning|let me think|step\s+\d+|\d+\.\s+\*\*)")
+_ANSWER_MARK = _re.compile(r"(?is)\b(final\s+(?:prompt|answer)|enhanced\s+prompt|here'?s?\s+(?:the|your)[^:\n]{0,40}|prompt|output)\s*[:\-]\s*")
+
+def _clean_line(t: str) -> str:
+    t = _re.sub(r"(?i)^\s*(\*?draft\s*\d*\*?\s*[:\-]?|prompt\s*[:\-]|output\s*[:\-])\s*", "", t)
+    return t.strip().strip('"*`').strip()
+
+def _extract_prompt(raw: str) -> str:
+    if not raw:
+        return ""
+    t = _re.sub(r"(?is)<(think|thought|reasoning)>.*?</\1>", "", raw).strip()
+    # Reasoning models that write several labelled "Draft N:" attempts → take the LAST
+    # draft's prose (their refined answer), up to the next blank line / word-count tally.
+    drafts = list(_re.finditer(
+        r"(?is)\*?\s*draft\s*\d*\*?\s*[:\-]?\s*(.+?)(?:\n\s*\n|\*?\s*word\s*count|\*?\s*refin|$)", t))
+    for d in reversed(drafts):
+        cand = _clean_line(d.group(1))
+        if len(cand) >= 40:
+            return cand
+    ms = list(_ANSWER_MARK.finditer(t))
+    if ms:                                   # explicit "Final prompt:"-style marker wins
+        return _clean_line(t[ms[-1].end():])
+    if _COT_MARK.search(t):                  # reasoning present, no marker → last real paragraph
+        paras = [p.strip() for p in _re.split(r"\n\s*\n", t) if len(p.strip()) >= 40
+                 and not _re.match(r"(?i)^\s*[\d*]", p.strip())]
+        if paras:
+            return _clean_line(paras[-1])
+    return _clean_line(t)
 
 
 @router.get("/api/nsfw/status")
@@ -40,7 +75,7 @@ def nsfw_generate(req: NsfwGenerateRequest, background_tasks: BackgroundTasks):
         raise HTTPException(400, "prompt required")
     core.refuse_unsafe(req.prompt)
     conn = get_conn()
-    model = _resolve_model(conn, req.model)
+    model = req.model or (get_setting('nsfw_image_model', '') or None) or _resolve_model(conn, None)
     gen_ids = []
     for _ in range(max(1, min(4, req.variations))):
         cur = conn.execute(
@@ -160,12 +195,11 @@ def nsfw_enhance(req: NsfwEnhanceRequest):
 
     def _work():
         raw = _call_lmstudio(system, idea, max_tokens=1200)
-        import re as _re
-        txt = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
-        txt = txt.strip().strip('"*').strip()
-        if txt.upper().startswith("REFUSED"):
-            return {"enhanced": "", "refused": True, "original": idea}
-        # safety floor also screens the MODEL's output before it reaches the user
+        txt = _extract_prompt(raw)   # discard chain-of-thought; keep only the prompt line
+        if not txt or txt.upper().startswith("REFUSED"):
+            return {"enhanced": "", "refused": txt.upper().startswith("REFUSED"), "original": idea}
+        # safety floor screens the MODEL's OUTPUT (the extracted prompt only — never the
+        # CoT, which quotes the rules and would false-trip the minors filter).
         reason = core.safety_check(txt)
         if reason:
             return {"enhanced": "", "refused": True, "reason": reason, "original": idea}

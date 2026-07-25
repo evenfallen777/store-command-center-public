@@ -181,13 +181,37 @@ function agentSetBusy(busy) {
 }
 
 /* ── message rendering ── */
+async function agentRememberMsg(text, btn) {
+  // Owner-captured answer → shared memory. Owner's explicit click IS the review,
+  // so it goes straight to trusted (remember + promote).
+  if (!text || !text.trim()) return;
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await api('/api/knowledge/remember', { method: 'POST', body: JSON.stringify({ text: text.slice(0, 4000), agent: 'assistant', tags: 'answer' }) });
+    if (r.ok && r.id) await api(`/api/knowledge/notes/${r.id}/promote`, { method: 'POST' });
+    if (btn) btn.textContent = '🧠 Saved ✓';
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '🧠 Remember'; }
+    if (typeof toast === 'function') toast('remember failed: ' + e.message, 'error');
+  }
+}
+
 function agentRenderMsg(m) {
   const msgs = document.getElementById('agent-msgs');
   if (!msgs) return;
   const kind = m.kind || m.role || 'assistant';
   const div = document.createElement('div');
   if (kind === 'user') { div.className = 'agent-msg user'; div.textContent = m.content; }
-  else if (kind === 'assistant') { div.className = 'agent-msg assistant'; div.textContent = m.content; }
+  else if (kind === 'assistant') {
+    div.className = 'agent-msg assistant';
+    const body = document.createElement('div'); body.textContent = m.content; div.appendChild(body);
+    const rb = document.createElement('button');
+    rb.className = 'btn-sm'; rb.textContent = '🧠 Remember';
+    rb.title = 'Save this answer to shared memory (trusted)';
+    rb.style.cssText = 'margin-top:6px;font-size:.7rem;opacity:.7;';
+    rb.addEventListener('click', () => agentRememberMsg(m.content, rb));
+    div.appendChild(rb);
+  }
   else if (kind === 'status') { div.className = 'agent-msg status'; div.textContent = m.content; }
   else if (kind === 'error') { div.className = 'agent-msg errormsg'; div.textContent = '❌ ' + m.content; }
   else if (kind === 'tool_call') {

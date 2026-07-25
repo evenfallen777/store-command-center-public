@@ -144,49 +144,79 @@ class SetupOwnIn(BaseModel):
 
 @router.post("/api/github/repo/setup-own")
 def github_setup_own(body: SetupOwnIn = None):
-    """Fresh-install onboarding: make this clone YOURS. The repo it was cloned from
-    becomes the `upstream` remote (updates keep flowing from it) and a new repo under
-    the signed-in account becomes `origin` (your own changes push there)."""
+    """Fresh-install onboarding: FORK the repo this install was cloned from (your
+    public repo) under the signed-in account, then wire the fork as `origin` and the
+    original as `upstream` (updates keep flowing from it), and give you your own `dev`
+    branch to work on. NO retail branch — retail is the OWNER's publish/scrub step; an
+    install never ships a public version. A real fork (not a fresh copy) preserves the
+    GitHub link so you can pull upstream updates and open PRs back."""
     body = body or SetupOwnIn()
     rc, out, _ = _run([GH_BIN, "api", "user", "--jq", ".login"])
     if rc != 0:
-        raise HTTPException(401, "Sign in to GitHub first (Settings → System → GitHub).")
+        raise HTTPException(401, "Sign in to GitHub first (GitHub tab → Sign in).")
     login = out.strip()
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", (body.name or "").strip()) or "store-command-center"
+
     origin = _git(REPO_MASTER, ["remote", "get-url", "origin"])
-    if (_remote_owner(origin) or "").lower() == login.lower():
+    if not origin:
+        raise HTTPException(400, "No 'origin' remote to fork — this install has no source repo.")
+    m = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", origin)
+    if not m:
+        raise HTTPException(400, f"Could not parse a GitHub owner/repo from origin ({origin[:80]}).")
+    up_owner, up_repo = m.group(1), m.group(2)
+    if up_owner.lower() == login.lower():
         return {"ok": True, "already": True,
-                "message": f"origin already belongs to {login} — nothing to do."}
+                "message": f"origin already belongs to {login} — this install is already yours."}
+
+    fork_name = re.sub(r"[^A-Za-z0-9._-]", "-", (body.name or "").strip()) or up_repo
     steps = []
 
     def st(step, rc, detail):
         steps.append({"step": step, "ok": rc == 0, "detail": (detail or "")[:200]})
 
-    renamed = False   # did WE rename origin→upstream? Only then may a rollback undo it.
-    if origin:
-        if _git(REPO_MASTER, ["remote", "get-url", "upstream"]):
-            rc, o = _gitc(REPO_MASTER, "remote", "remove", "origin")
-            st("drop old origin (upstream already set)", rc, o)
-        else:
-            rc, o = _gitc(REPO_MASTER, "remote", "rename", "origin", "upstream")
-            st("origin → upstream (your update source)", rc, o)
-            if rc != 0:
-                raise HTTPException(500, f"Could not rename origin: {o[:200]}")
-            renamed = True
-    rc, o, err = _run([GH_BIN, "repo", "create", f"{login}/{name}",
-                       "--private" if body.private else "--public",
-                       "--source", REPO_MASTER, "--remote", "origin", "--push"], timeout=300)
-    st(f"create {login}/{name} + push", rc, err or o)
-    if rc != 0:
-        # roll back OUR rename only — never touch a pre-existing upstream remote
-        if renamed and not _git(REPO_MASTER, ["remote", "get-url", "origin"]):
-            _gitc(REPO_MASTER, "remote", "rename", "upstream", "origin")
-        raise HTTPException(502, f"gh repo create failed: {(err or o).strip()[:300]}")
-    rc, o = _gitc(REPO_MASTER, "push", "origin", "--all", timeout=300)
-    st("push all branches", rc, o)
-    return {"ok": True, "steps": steps, "origin": f"https://github.com/{login}/{name}",
-            "message": f"This install now pushes to {login}/{name}. Updates still come "
-                       "from upstream (the repo you cloned)."}
+    # 1. Fork upstream under the signed-in account (server-side; keeps the GitHub fork
+    #    relationship so updates pull from upstream and PRs flow back). Idempotent: gh
+    #    reports an existing fork rather than failing.
+    fork_args = [GH_BIN, "repo", "fork", f"{up_owner}/{up_repo}", "--clone=false"]
+    if fork_name != up_repo:
+        fork_args += ["--fork-name", fork_name]
+    rc, o, err = _run(fork_args, timeout=300)
+    detail = (err or o or "")
+    forked_ok = rc == 0 or "already exists" in detail.lower()
+    st(f"fork {up_owner}/{up_repo} → {login}/{fork_name}", 0 if forked_ok else 1, detail)
+    if not forked_ok:
+        raise HTTPException(502, f"gh repo fork failed: {detail.strip()[:300]}")
+
+    # 2. Remotes: original → upstream (update source), fork → origin (your pushes).
+    if _git(REPO_MASTER, ["remote", "get-url", "upstream"]):
+        rc, ro = _gitc(REPO_MASTER, "remote", "remove", "origin")
+        st("drop old origin (upstream already set)", rc, ro)
+    else:
+        rc, ro = _gitc(REPO_MASTER, "remote", "rename", "origin", "upstream")
+        st("origin → upstream (your update source)", rc, ro)
+    fork_url = f"https://github.com/{login}/{fork_name}.git"
+    rc, ro = _gitc(REPO_MASTER, "remote", "add", "origin", fork_url)
+    st("add origin = your fork", rc, ro)
+
+    # 3. Your own dev branch off the current default. NO retail.
+    cur = (_git(REPO_MASTER, ["rev-parse", "--abbrev-ref", "HEAD"]) or "main").strip()
+    if not _git(REPO_MASTER, ["rev-parse", "--verify", "-q", "dev"]):
+        rc, ro = _gitc(REPO_MASTER, "branch", "dev", cur)
+        st("create your dev branch", rc, ro)
+
+    # 4. Push the default branch + dev to your fork (never retail).
+    rc, ro = _gitc(REPO_MASTER, "push", "-u", "origin", cur, timeout=300)
+    st(f"push {cur} → your fork", rc, ro)
+    rc, ro = _gitc(REPO_MASTER, "push", "-u", "origin", "dev", timeout=300)
+    st("push dev → your fork", rc, ro)
+
+    return {"ok": True, "steps": steps,
+            "origin": f"https://github.com/{login}/{fork_name}",
+            "upstream": f"https://github.com/{up_owner}/{up_repo}",
+            "message": (f"Forked to {login}/{fork_name} with your own 'dev' branch. Updates flow "
+                        f"from upstream ({up_owner}/{up_repo}); push your work to your fork and "
+                        "open a PR to contribute back."),
+            "warning": ("Editing store core files will conflict when you update — keep your changes "
+                        "on your fork's 'dev' branch, and build add-ons as plugins where possible.")}
 
 
 @router.get("/api/github/repos")

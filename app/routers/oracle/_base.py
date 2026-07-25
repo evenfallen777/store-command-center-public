@@ -2,6 +2,7 @@
 schema + default-analyst seed (both run once at import), the tournament constants,
 and the low-level helpers (meta key/value store, tracked-asset list, price lookup,
 searx research) used across the forecast / scoring / agents submodules."""
+import json as _json
 from typing import Optional
 
 import requests
@@ -27,8 +28,13 @@ DEFAULT_ANALYSTS = [
 ]
 
 # Auto-resolvable assets. Crypto → CoinGecko id; stocks come from stocks_watchlist.
+# CRYPTO_IDS is the built-in DEFAULT map. The owner-editable set lives in the
+# `oracle_crypto_assets` setting (JSON symbol→CoinGecko-id) — see crypto_ids()
+# below. BTC/ETH/SOL/XRP/DOGE are the tracked defaults; ADA/LTC are extra
+# resolvable ids kept around for legacy rows but not in the default tracked set.
 CRYPTO_IDS = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
               "DOGE": "dogecoin", "ADA": "cardano", "LTC": "litecoin"}
+DEFAULT_CRYPTO_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]   # today's tracked defaults
 
 # ── the short-horizon LADDER ──────────────────────────────────────────────────
 # Each forecast produces one prediction PER RUNG (day-trade-friendly horizons), so
@@ -44,6 +50,8 @@ ORACLE_SETTINGS_DEFAULTS = {
     "oracle_ladder":         "1,3,5,7,14",      # per-rung enable: the horizons forecast
     "oracle_long_tier":      "0",               # add the optional 30d long-tier rung
     "oracle_company_hookup": "1",               # Company/world may cite the consensus (advisory only)
+    "oracle_crypto_assets":  "",                # "" = built-in defaults (BTC/ETH/SOL/XRP/DOGE);
+                                                 # else a JSON {SYMBOL: coingecko_id} FULL override map
 }
 
 
@@ -90,6 +98,14 @@ def _ensure_schema():
         conn.execute("ALTER TABLE oracle_predictions ADD COLUMN batch_id TEXT")
     except Exception:
         pass                                   # column already exists
+    # additive migration: each rung may carry a DUALITY band — {"high","low",
+    # "expected"} json from world_duality.forecast_band (✝️ best case / 😈 worst
+    # case / calibrated middle). NULL on legacy rows and while both lieutenants
+    # are off — purely informational, scoring is untouched.
+    try:
+        conn.execute("ALTER TABLE oracle_predictions ADD COLUMN band TEXT")
+    except Exception:
+        pass                                   # column already exists
     conn.commit()
     conn.close()
 
@@ -119,12 +135,31 @@ def _meta_set(k, v):
     conn.commit(); conn.close()
 
 
+def crypto_ids() -> dict:
+    """Effective symbol→CoinGecko-id map the Oracle tracks. Owner-editable via the
+    `oracle_crypto_assets` setting (JSON), which — once saved — holds the FULL
+    map (defaults merged with the owner's adds/removes at save time, see
+    routers/oracle/auto.py). Empty/unset/unparseable → today's built-in default
+    tracked set (BTC/ETH/SOL/XRP/DOGE), i.e. zero behavior change out of the box."""
+    raw = get_setting("oracle_crypto_assets", "") or ""
+    if raw:
+        try:
+            d = _json.loads(raw)
+            if isinstance(d, dict) and d:
+                return {str(k).strip().upper(): str(v).strip() for k, v in d.items()
+                        if str(k).strip() and str(v).strip()}
+        except Exception:
+            pass
+    return {sym: CRYPTO_IDS[sym] for sym in DEFAULT_CRYPTO_ASSETS}
+
+
 def _assets() -> list:
-    """Tracked assets: the crypto majors + any non-crypto stock tickers on the watchlist."""
-    out = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    """Tracked assets: the configured crypto set + any non-crypto stock tickers on
+    the watchlist. Crypto set is owner-editable — see crypto_ids()."""
+    out = list(crypto_ids().keys())
     wl = (get_setting("stocks_watchlist", "") or "").upper()
     for s in [x.strip() for x in wl.split(",") if x.strip()]:
-        if "-" in s or s in CRYPTO_IDS:      # skip BTC-USD style + crypto dupes
+        if "-" in s or s in out:            # skip BTC-USD style + crypto dupes
             continue
         out.append(s)
     return out
@@ -133,10 +168,11 @@ def _assets() -> list:
 def _price(asset: str) -> Optional[float]:
     """Current USD price. Crypto via CoinGecko, stocks via yfinance. None on failure."""
     try:
-        if asset in CRYPTO_IDS:
+        cids = crypto_ids()
+        if asset in cids:
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": CRYPTO_IDS[asset], "vs_currencies": "usd"}, timeout=15)
-            return float(r.json()[CRYPTO_IDS[asset]]["usd"])
+                             params={"ids": cids[asset], "vs_currencies": "usd"}, timeout=15)
+            return float(r.json()[cids[asset]]["usd"])
         import yfinance as yf
         fi = yf.Ticker(asset).fast_info
         p = None

@@ -51,10 +51,10 @@ window.WMOON = (function () {
       x.fillStyle = '#8b887e'; x.fillRect(tc0 * T, tr0 * T, (tc1 - tc0) * T, (tr1 - tr0) * T);
     }
     for (let r = tr0; r < tr1; r++) for (let c = tc0; c < tc1; c++) {
-      if (_rand(c, r, 1) > 0.022) continue;                   // sparse crater seeds (cleaner than a mottled field)
-      const cx = (c + 0.5) * T, cy = (r + 0.5) * T, rad = T * (0.6 + _rand(c, r, 2) * 1.3);
+      if (_rand(c, r, 1) > 0.010) continue;                   // sparse crater seeds (lower density → no overlap pile-up)
+      const cx = (c + 0.5) * T, cy = (r + 0.5) * T, rad = T * (0.5 + _rand(c, r, 2) * 0.6);
       x.fillStyle = 'rgba(52,50,45,0.4)'; x.beginPath(); x.arc(cx, cy, rad, 0, 6.283); x.fill();
-      x.fillStyle = 'rgba(220,217,206,0.28)'; x.beginPath(); x.arc(cx - rad * 0.24, cy - rad * 0.24, rad * 0.7, 0, 6.283); x.fill();   // sunlit rim
+      x.strokeStyle = 'rgba(220,217,206,0.28)'; x.lineWidth = Math.max(0.6, rad * 0.18); x.beginPath(); x.arc(cx - rad * 0.24, cy - rad * 0.24, rad * 0.7, 0, 6.283); x.stroke();   // sunlit rim (thin stroke — translucent fills can't stack into blotches)
       x.fillStyle = 'rgba(34,32,28,0.5)'; x.beginPath(); x.arc(cx + rad * 0.16, cy + rad * 0.16, rad * 0.4, 0, 6.283); x.fill();      // shadowed floor
     }
   }
@@ -294,7 +294,7 @@ window.WMOON = (function () {
         if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
         _retBtn = document.createElement('button');
         _retBtn.className = 'btn'; _retBtn.textContent = '🌍 Return to Earth';
-        _retBtn.style.cssText = 'position:absolute;top:12px;left:12px;z-index:20;padding:6px 12px;display:none';
+        _retBtn.style.cssText = 'position:absolute;top:48px;left:12px;z-index:30;padding:6px 12px;display:none';
         _retBtn.onclick = travelToEarth;
         wrap.appendChild(_retBtn);
       }

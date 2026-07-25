@@ -63,7 +63,7 @@ def delegate_llm(peer_id: int, system: str, user: str, model: str = None,
     """Submit an llm job to an approved peer's queue and block for the result.
     Returns the output text, or raises. Raises 409 when the peer lacks the required
     model — callers treat that as 'keep the job in the local queue'. (Used by future
-    'borrow a friend's GPU' features; also the Settings → Peers test button.)
+    'borrow a friend's GPU' features; also the Crypto → JellyCoin → Peers test button.)
 
     Billing (consumer side). We quote FIRST, then send. When the peer advertises
     token mode we pay for the ANSWER only, at the quoted rate, and never more than
@@ -87,7 +87,7 @@ def delegate_llm(peer_id: int, system: str, user: str, model: str = None,
         cap = jx.peer_cap_check(peer["name"], worst)
         if not cap["ok"]:
             raise HTTPException(402, f"Refusing to send this job to '{peer['name']}': {cap['reason']}. "
-                                     "Raise the cap in Settings → Peers → Compute pricing, "
+                                     "Raise the cap in Crypto → JellyCoin → Peers → Compute pricing, "
                                      "or run the job locally.")
     resp = _call_peer(peer, "POST", "/api/peers/rpc/job",
                       {"kind": "llm", "system": system, "user": user,

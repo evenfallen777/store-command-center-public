@@ -12,11 +12,17 @@ from geo_util import *
 
 
 def _run_trend_scan():
+    """Multi-lane trend scan: fetch every enabled source (Google/Reddit/custom
+    RSS + categorized feed groups + the Etsy demand signal), route items into
+    the enabled proposal LANES (trends.LANES), and run each lane's own prompt
+    as its own orchestrator LLM task (task=<lane prompt key>, so the per-task
+    model picker applies). Proposals insert lane-tagged as each lane finishes."""
     global _trend_scan
     _trend_scan = {"status": "running", "message": "Starting scan…", "last_run": None, "last_count": 0}
 
     conn = get_conn()
     rows = conn.execute("SELECT key,value FROM settings WHERE key LIKE 'trend_%'").fetchall()
+    lanes_raw = conn.execute("SELECT value FROM settings WHERE key='proposal_lanes_enabled'").fetchone()
     conn.close()
     cfg = {r["key"]: r["value"] for r in rows}
 
@@ -27,7 +33,10 @@ def _run_trend_scan():
     subs       = [s.strip() for s in cfg.get("trend_reddit_subs", ",".join(DEFAULT_SUBS)).split(",") if s.strip()]
     rss_urls   = [u.strip() for u in cfg.get("trend_rss_urls", "\n".join(DEFAULT_RSS_FEEDS)).splitlines() if u.strip()]
 
-    raw: list[tuple[str, str]] = []
+    import trends as _trends
+    lanes_on = _trends.parse_lanes_enabled(lanes_raw["value"] if lanes_raw else "")
+
+    raw: list[tuple[str, str]] = []      # (text, source category)
 
     if google_on:
         _trend_scan["message"] = "🔍 Fetching Google Trends…"
@@ -36,73 +45,107 @@ def _run_trend_scan():
 
     if reddit_on:
         _trend_scan["message"] = "🗨 Fetching Reddit RSS…"
-        for t in fetch_reddit_rss(subs):
-            raw.append((t, "reddit"))
+        raw.extend(fetch_reddit_rss_tagged(subs))
 
     if rss_on:
         _trend_scan["message"] = "📰 Fetching RSS feeds…"
         for t in fetch_rss_feeds(rss_urls):
             raw.append((t, "rss"))
 
-    if not raw:
-        _trend_scan = {"status": "idle", "message": "No trends fetched — check sources", "last_run": None, "last_count": 0}
+    _trend_scan["message"] = "🗞 Fetching categorized news feeds…"
+    try:
+        raw.extend(fetch_feed_groups(feed_group_config(cfg)))
+    except Exception as e:
+        logger.warning("feed groups fetch failed: %s", e)
+
+    # Etsy demand signal → the market lane's trend items + the {etsy_signal} brief
+    etsy_brief = ""
+    try:
+        import etsy_signal
+        _trend_scan["message"] = "🛍 Reading the Etsy demand signal…"
+        snap = etsy_signal.snapshot()
+        etsy_brief = etsy_signal.signal_text(snap)
+        for term in (snap.get("hot_terms") or [])[:20]:
+            raw.append((term, "etsy"))
+    except Exception as e:
+        logger.warning("etsy signal read failed: %s", e)
+
+    # Which lanes can actually run this pass?
+    lane_runs = []                        # (lane dict, items)
+    for lane in LANES:
+        if lane["id"] not in lanes_on:
+            continue
+        items = lane_items(lane, raw)
+        if items or not lane["sources"]:  # source-less lanes (evergreen) always run
+            lane_runs.append((lane, items))
+    if not lane_runs:
+        _trend_scan = {"status": "idle", "message": "No trends fetched — check sources/lanes", "last_run": None, "last_count": 0}
         return
 
-    _trend_scan["message"] = f"🤖 Asking LLM to evaluate {len(raw)} trends…"
-
-    # Submit through orchestrator so it waits for GPU to be free
-    def _llm_work():
-        return generate_proposals_from_trends(raw, _call_lmstudio)
-
-    task_id = orch.submit_llm(_llm_work, desc="Trend scan analysis", priority=2)   # background
-    # Block until done (we're already in a background thread)
-    proposals = []
-    for _ in range(180):
-        t = orch.poll(task_id)
-        if t["status"] == "done":
-            proposals = t["result"] or []
-            break
-        if t["status"] in ("error", "cancelled"):
-            _trend_scan = {"status": "idle", "message": f"❌ LLM failed: {t.get('error','')}", "last_run": None, "last_count": 0}
-            return
-        time.sleep(1)
-
-    # Insert proposals into DB, skipping near-duplicates of recent ones
-    conn = get_conn()
-    recent_titles = set(
-        row[0].lower() for row in
-        conn.execute("SELECT title FROM proposals WHERE created_at > datetime('now','-14 days')").fetchall()
-    )
-    count = 0
-    for p in proposals:
-        title = p["title"]
-        # Simple dedup: skip if any recent title shares 4+ consecutive words
-        title_words = set(title.lower().split())
-        is_dup = any(
-            len(title_words & set(rt.split())) >= 4
-            for rt in recent_titles
+    def _insert(proposals):
+        """Insert one lane's proposals, skipping near-duplicates of recent ones."""
+        n = 0
+        conn = get_conn()
+        recent_titles = set(
+            row[0].lower() for row in
+            conn.execute("SELECT title FROM proposals WHERE created_at > datetime('now','-14 days')").fetchall()
         )
-        if is_dup:
-            continue
-        try:
-            conn.execute(
-                "INSERT INTO proposals (title,description,source,source_label,tags) VALUES (?,?,?,?,?)",
-                (p["title"], p["description"], p["source"], p["source_label"], p.get("tags", ""))
-            )
-            recent_titles.add(title.lower())
-            count += 1
-        except Exception:
-            pass
+        for p in proposals:
+            title_words = set(p["title"].lower().split())
+            if any(len(title_words & set(rt.split())) >= 4 for rt in recent_titles):
+                continue
+            try:
+                conn.execute(
+                    "INSERT INTO proposals (title,description,source,source_label,tags,lane) VALUES (?,?,?,?,?,?)",
+                    (p["title"], p["description"], p["source"], p["source_label"],
+                     p.get("tags", ""), p.get("lane", ""))
+                )
+                recent_titles.add(p["title"].lower())
+                n += 1
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        return n
+
+    count, failed = 0, []
+    for lane, items in lane_runs:
+        _trend_scan["message"] = f"🤖 {lane['label']} lane: evaluating {len(items)} item(s)…"
+        system = get_prompt(lane["prompt_key"])
+        if lane["id"] == "market":
+            system = system.replace("{etsy_signal}", etsy_brief or "(no signal available — fall back to broad Etsy best-seller intuition)")
+
+        def _llm_work(items=items, system=system, lane_id=lane["id"], allow_empty=not lane["sources"]):
+            return generate_proposals_from_trends(items, _call_lmstudio, system=system,
+                                                  lane=lane_id, allow_empty=allow_empty)
+
+        task_id = orch.submit_llm(_llm_work, desc=f"Trend scan: {lane['label']} lane",
+                                  priority=2, task=lane["prompt_key"])   # background
+        # Block until this lane is done (we're already in a background thread)
+        for _ in range(180):
+            t = orch.poll(task_id)
+            if t["status"] == "done":
+                count += _insert(t["result"] or [])
+                break
+            if t["status"] in ("error", "cancelled"):
+                failed.append(lane["id"])
+                break
+            time.sleep(1)
+
     from datetime import datetime
     now = datetime.utcnow().isoformat()
+    conn = get_conn()
     conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", ("trend_last_run",  now))
     conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", ("trend_last_count", str(count)))
     conn.commit()
     conn.close()
 
+    msg = f"✓ Scan complete — {count} proposal(s) added across {len(lane_runs)} lane(s)"
+    if failed:
+        msg += f" (failed lanes: {', '.join(failed)})"
     _trend_scan = {
         "status":     "idle",
-        "message":    f"✓ Scan complete — {count} proposal(s) added",
+        "message":    msg,
         "last_run":   now,
         "last_count": count,
     }
@@ -179,7 +222,10 @@ def _do_publish(design_id, title, description, tags, product_type, image_path, r
 
 def build_etsy_client():
     """A ready EtsyClient from settings (token refreshed + persisted if expiring).
-    Returns None if Etsy isn't configured. Shared by publish + revenue sync."""
+    Returns None if Etsy isn't configured OR its auth is stale (reconnect needed) —
+    stale auth is logged once by etsy_client.mark_auth_stale, then callers get a
+    quiet None instead of raw 400s. Shared by publish + revenue sync."""
+    import etsy_client as _ec
     s = _get_etsy_settings()
     key, access_token = s.get("etsy_key", ""), s.get("etsy_access_token", "")
     shop_id, refresh_tok = s.get("etsy_shop_id", ""), s.get("etsy_refresh_token", "")
@@ -191,6 +237,8 @@ def build_etsy_client():
     except Exception:
         expires_at = 0
     if time.time() >= expires_at - 120 and refresh_tok:
+        if _ec.auth_needs_reconnect():
+            return None   # known-dead refresh token — don't re-spam Etsy or the log
         try:
             tokens = refresh_access_token(key, refresh_tok, client_secret=secret or None)
             access_token = tokens["access_token"]
@@ -199,6 +247,8 @@ def build_etsy_client():
             conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", ("etsy_access_token", _enc(access_token)))
             conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", ("etsy_token_expires", str(new_exp)))
             conn.commit(); conn.close()
+        except EtsyAuthError:
+            return None   # already flagged + logged once inside refresh_access_token
         except Exception as e:
             logger.warning("etsy token refresh failed: %s", e)
     return EtsyClient(key, access_token, shop_id, shared_secret=secret)
@@ -250,7 +300,15 @@ def _do_etsy_publish(design_id, title, description, tags, price, product_type, i
         client  = EtsyClient(key, access_token, shop_id, shared_secret=secret)
         listing = client.create_draft_listing(title, description, price, tag_list, product_type)
         lid     = listing["listing_id"]
-        client.upload_listing_image(lid, image_path)
+        # Upload the Etsy-spec variant (1024²/≤5MB JPEG), not the raw master — a
+        # 4096²/20MB PNG is over Etsy's limits and gets rejected. Fall back to the
+        # master if derivation fails for any reason.
+        try:
+            import image_sizes
+            etsy_img = image_sizes.one(image_path, "etsy")
+        except Exception:
+            etsy_img = None
+        client.upload_listing_image(lid, str(etsy_img) if etsy_img else image_path)
         # Take the draft LIVE (toggle etsy_auto_activate, default on). Best-effort: Etsy
         # rejects activation if the shop lacks a shipping profile etc. — stay draft then.
         if get_setting("etsy_auto_activate", "1") == "1":
@@ -267,6 +325,10 @@ def _do_etsy_publish(design_id, title, description, tags, price, product_type, i
         conn.commit()
         conn.close()
         logger.info("Published to Etsy: '%s' (%s) → listing %s", title, product_type, lid)
+    except EtsyAuthError:
+        # Stale OAuth — already flagged + logged ONCE by etsy_client.mark_auth_stale.
+        # Stay quiet here; the UI surfaces the 'Reconnect Etsy' CTA from /api/etsy/status.
+        pass
     except Exception as e:
         logger.error("Etsy publish error: %s", e)
 
@@ -324,6 +386,14 @@ def run_generation(gen_id: int):
                 "INSERT INTO designs (generation_id,image_path,prompt,product_type,source,nsfw,nsfw_category) VALUES (?,?,?,?,?,?,?)",
                 (gen_id, str(out_path), row["prompt"], row["product_type"] or "T-Shirt", gen_source, gen_nsfw or 0, gen_nsfw_cat)
             )
+            # Auto-derive publish-ready sizes (Etsy 1024²/≤5MB + web/medium) from the
+            # master so a 4096²/20MB render is immediately usable. Best-effort — the
+            # module swallows its own errors, but guard the import too.
+            try:
+                import image_sizes
+                image_sizes.derive(out_path)
+            except Exception as _e:
+                logger.warning("size derive skipped for gen %d: %s", gen_id, _e)
         else:
             err_msg = (result.stderr or "")[:300] if result.returncode != 0 else "output file missing"
             logger.error("Generation %d failed (rc=%d): %s", gen_id, result.returncode, err_msg)

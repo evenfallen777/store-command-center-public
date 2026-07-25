@@ -1,7 +1,7 @@
 """Network Security routes — live connection intelligence + Pi-hole scan/findings."""
 from ._base import router
 # Importing the engine modules registers their @router decorators on `router`.
-from . import posture, engines, scans, dns   # noqa: F401
+from . import posture, engines, scans, dns, redblue   # noqa: F401
 
 # Re-exports so external callers keep resolving `security.<name>` exactly as they
 # did against the old single-file module:

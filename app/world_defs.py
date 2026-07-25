@@ -105,6 +105,46 @@ WORKER_POOL = [
     ("w_asst_1",   "Jarvis", "assistant", "assistant", "#d8b4fe"),
 ]
 
+# The 5 Oracle analysts are named after their LLMs (see DEFAULT_ANALYSTS in
+# routers/oracle/_base.py) — great for the tournament board, awful as a citizen's
+# name. Give each a persona for the world body; the raw model id is kept in
+# world_agents.model_id (detail-panel only) so nothing forecasting-side changes.
+ORACLE_PERSONAS = {
+    "GLM-4.7":         "Delphi",
+    "GLM-4.6v":        "Pythia",
+    "Qwen3.5-9B":      "Sibyl",
+    "Qwen-Coder-32B":  "Cassandra",
+    "Qwen3-Coder-30B": "Merlin",
+}
+
+def _oracle_persona(model_name):
+    """Persona for an oracle analyst's world body; unknown analysts (custom /
+    renamed rows) fall back to "Oracle <short id>" instead of the raw model id."""
+    if model_name in ORACLE_PERSONAS:
+        return ORACLE_PERSONAS[model_name]
+    return "Oracle " + model_name[:12]
+
+
+def _migrate_oracle_personas(conn, c):
+    """One-time: the 5 oracle world_agents rows seeded before ORACLE_PERSONAS
+    existed still show the raw model id as their name (seed() never overwrites
+    an existing row). Rename them to their persona. Idempotent — guarded by a
+    world_meta flag, and each UPDATE only fires if the name is STILL the exact
+    old model id (a user rename, or a previous run of this migration, is left
+    alone)."""
+    if mget(c, "world_oracle_personas_migrated", "") == "1":
+        return
+    try:
+        import re as _re
+        for model_name, persona in ORACLE_PERSONAS.items():
+            key = "oracle_" + _re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_")
+            c.execute("UPDATE world_agents SET name=?, model_id=COALESCE(model_id,?) "
+                      "WHERE key=? AND name=?", (persona, model_name, key, model_name))
+    except Exception:
+        pass
+    mset(c, "world_oracle_personas_migrated", "1")
+
+
 # ── Economy ───────────────────────────────────────────────────────────────────
 ITEM_COST = 30          # coins to conjure a new prop/item
 UPGRADES = [
@@ -229,18 +269,23 @@ def seed(conn):
             c.execute("INSERT INTO world_agents (key,name,kind,job_class,dept,color,location,state) "
                       "VALUES (?,?,?,?,?,?,?,?)",
                       (key, name, "worker", "swarm", "devlab", color, "home", "idle"))
-    # ORACLE agents — every active model in the oracle roster gets a body
+    # ORACLE agents — every active model in the oracle roster gets a body.
+    # Display name is a persona (ORACLE_PERSONAS) — the raw model id is kept in
+    # model_id for the detail panel only, never shown as the citizen's name.
     try:
         import re as _re
         for r in c.execute("SELECT name FROM oracle_agents WHERE active=1").fetchall():
-            key = "oracle_" + _re.sub(r"[^a-z0-9]+", "_", r["name"].lower()).strip("_")
+            model_name = r["name"]
+            key = "oracle_" + _re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_")
             if key not in existing and not c.execute(
                     "SELECT 1 FROM world_agents WHERE key=?", (key,)).fetchone():
-                c.execute("INSERT INTO world_agents (key,name,kind,job_class,dept,color,location,state) "
-                          "VALUES (?,?,?,?,?,?,?,?)",
-                          (key, r["name"], "worker", "oracle", "devlab", "#8b5cf6", "home", "idle"))
+                c.execute("INSERT INTO world_agents (key,name,kind,job_class,dept,color,location,state,model_id) "
+                          "VALUES (?,?,?,?,?,?,?,?,?)",
+                          (key, _oracle_persona(model_name), "worker", "oracle", "devlab", "#8b5cf6",
+                           "home", "idle", model_name))
     except Exception:
         pass
+    _migrate_oracle_personas(conn, c)
     for key, name, dept, color, kind, home in SPECIAL_AGENTS:
         if key not in existing:
             c.execute("INSERT INTO world_agents (key,name,kind,job_class,dept,color,location,state,coins) "

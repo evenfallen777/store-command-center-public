@@ -67,7 +67,7 @@ _CREATE_CREATION = """
 mutation CreateCreation(
   $name: String!, $description: String!,
   $imageUrls: [String!]!, $fileUrls: [String!]!,
-  $locale: Locale!, $price: Float, $currency: Currency,
+  $locale: LocaleEnum!, $price: Float, $currency: Currency,
   $tagNames: [String!], $license: CreationLicense, $madeWithAi: Boolean
 ) {
   createCreation(

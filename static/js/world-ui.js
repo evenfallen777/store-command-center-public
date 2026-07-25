@@ -33,6 +33,7 @@ function _renderDetail() {
       ${a.kind==='openclaw'?' · <span style="color:#f472b6">real agent</span>':''}
       ${a.blessed?' · <span style="color:#fcd34d" title="God blessed their work — +25% pay & XP for an hour">😇 blessed</span>':''}
       ${a.thriving?' · <span style="color:#6ee7a8" title="Every need in the green — +25% pay & XP">🌟 thriving</span>':''}</div>
+    ${a.model_id?`<div style="margin-bottom:6px;font-size:.7rem;color:#7a86a0" title="LM Studio model backing this Oracle analyst">🔮 ${esc(a.model_id)}</div>`:''}
     ${a.output_pct != null && a.output_pct < 100 ? `<div style="font-size:.7rem;color:#f0a860;margin-bottom:4px" title="Doing the same thing too long — output decays until they switch it up">🥱 ${a.streak_min}m of nonstop ${esc(a.state)} · output ${a.output_pct}%</div>` : ''}
     <div style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:#0e1626;border-radius:8px">
       <span style="font-size:1.3rem">${esc(a.mood_emoji||'🙂')}</span>
@@ -163,7 +164,8 @@ function _rankBlock(company) {
   }).join('');
   return `<div style="background:#0e1626;border-radius:8px;padding:8px;margin-bottom:8px">
     <div style="font-size:.68rem;color:#7a86a0;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">🏆 Leaderboard <span style="text-transform:none;color:#54607a">· hover for podium</span></div>
-    ${rows}</div>`;
+    ${rows}
+    <div style="font-size:.66rem;color:#54607a;margin-top:6px">Forecaster rankings live on the 🔮 Oracle tab.</div></div>`;
 }
 
 function _moodBlock(a) {

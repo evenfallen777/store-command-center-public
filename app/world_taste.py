@@ -7,6 +7,9 @@ The town learns what YOU like. Three signal sources feed a labelled example set:
   • your design reviews     — the store's approve/reject pipeline (+1 / -1)
   • your own creations      — what god makes with god's own hands is what god
                               likes (+0.7 exemplars)
+  • the audience's verdict  — social post performance (views/likes vs the
+                              platform's own median) fed by app/social_scheduler
+                              .refresh_analytics via add_or_update_example
 
 Each example's text is EMBEDDED (LM Studio embeddings via the store's own LLM
 proxy — semantic vectors, so "cozy cabin poster" generalises to "warm cottage
@@ -74,6 +77,22 @@ def add_example(c, skey, kind, text, label, source):
     vec = _embed(text)
     c.execute("INSERT OR IGNORE INTO world_taste (skey,kind,text,label,source,vec) VALUES (?,?,?,?,?,?)",
               (skey, kind, text[:600], float(label), source, json.dumps(vec) if vec else None))
+    return 1
+
+
+def add_or_update_example(c, skey, kind, text, label, source):
+    """Like add_example, but REFRESHES the label when the skey already exists.
+    Built for social analytics (app/social_scheduler.py): a post's performance
+    label drifts as views/likes accumulate, so the same skey gets re-scored on
+    every refresh. The stored embedding is kept — the text is stable, only the
+    verdict moves. Returns 1 if anything was added/changed."""
+    ensure(c)
+    row = c.execute("SELECT id, label FROM world_taste WHERE skey=?", (skey,)).fetchone()
+    if not row:
+        return add_example(c, skey, kind, text, label, source)
+    if abs(float(row["label"]) - float(label)) < 1e-9:
+        return 0
+    c.execute("UPDATE world_taste SET label=? WHERE skey=?", (float(label), skey))
     return 1
 
 
@@ -162,6 +181,21 @@ def score(c, text, kind=None, k=7):
     if pos + neg == 0:
         return 0.5
     return max(0.0, min(1.0, pos / (pos + neg)))
+
+
+def score_band(c, text, kind=None, k=7):
+    """score() wrapped in the Jesus/Satan hi-lo band (world_duality):
+    {best, worst, expected, base}. best = the optimistic (Jesus) anchor,
+    worst = the adversarial (Satan) anchor, expected = the calibrated middle.
+    Falls back to a degenerate band (all values == the plain score) when the
+    lieutenants are off or the duality helper is unavailable — never errors."""
+    s = score(c, text, kind, k)
+    try:
+        import world_duality
+        return world_duality.band(s)
+    except Exception:
+        return {"best": s, "worst": s, "expected": s, "base": s,
+                "sides": {"jesus": False, "satan": False}}
 
 
 def stats(c):

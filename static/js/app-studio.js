@@ -13,6 +13,8 @@ const STUDIO_SUBS = [
   { k:'video',  view:'videos',    label:'\u{1F3AC} Video',  fn: () => renderVideos() },
   { k:'audio',  view:'audio',     label:'\u{1F3B5} Audio',  fn: () => renderAudio() },
   { k:'3d',     view:'models3d',  label:'\u{1F9E9} 3D',     fn: () => renderModels3D() },
+  { k:'director', view:'director', label:'\u{1F39E}️ Director', fn: () => renderDirector() },
+  { k:'brand',  view:'brandkit',  label:'\u{1F3AF} Brand',  fn: () => renderBrandKit() },
   { k:'gpu',    view:'studio',    label:'⚡ Queue',    fn: () => renderStudioQueue() },
 ];
 const _STUDIO_MODEL_SUBS = ['image', 'video', 'audio', '3d'];
@@ -24,6 +26,9 @@ async function renderStudio(sub) {
   const bar = STUDIO_SUBS.map(s =>
     `<div class="subtab${s.k === cur.k ? ' active' : ''}" onclick="studioSub('${s.k}')">${s.label}</div>`
   ).join('');
+  // Stop any playing player before the sub-tab swap — a detached media element
+  // can keep its audio playing after its view is gone (tab-videos.js helper).
+  if (typeof stopMediaIn === 'function') stopMediaIn(document.getElementById('main-content'));
   document.getElementById('main-content').innerHTML = `
     <div class="view-header">
       <div class="view-title">&#127917; Studio</div>

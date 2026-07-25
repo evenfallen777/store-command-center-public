@@ -1,4 +1,6 @@
-/* ── PEERS (friend Store installs: shared reviews + lent compute) ── */
+/* ── PEERS (friend Store installs: shared reviews + lent compute) ──
+   Renders into #peers-slot, which lives in the Jelly tab (tab-jellycoin.js,
+   Crypto → JellyCoin) since the Peers network is the JLY peer network. */
 async function loadPeers() {
   const el = document.getElementById('peers-slot');
   if (!el) return;
@@ -485,7 +487,7 @@ async function peerFiatRate() {
   if (!(v >= 0)) { toast('Enter a USD-per-JLY number', 'error'); return; }
   try {
     await api('/api/peers/billing/fiat-rate', { method: 'POST',
-      body: JSON.stringify({ usd_per_jly: v, basis: 'owner_assumed', note: 'set in Settings → Peers' }) });
+      body: JSON.stringify({ usd_per_jly: v, basis: 'owner_assumed', note: 'set in Crypto → JellyCoin → Peers' }) });
     toast('Recorded as YOUR assumption — it cannot post to the money ledger');
     loadPeerBilling();
   } catch (e) { toast('Error: ' + e.message, 'error'); }

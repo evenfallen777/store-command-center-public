@@ -60,34 +60,26 @@ def _model_context() -> int:
 
 
 def load_and_pin(model: str, context: int = None, unload_first: bool = True) -> dict:
-    """Robustly load `model` into VRAM, PINNED (no TTL) and with an adequate context
-    length. The 12GB GPU usually can't fit a second model, so we unload first to make
-    room. Falls back to the model's default context if the requested one won't fit.
-    Returns {ok, loaded, context, note}."""
-    context = context or _model_context()
+    """Make `model` the resident LLM by requesting it THROUGH the unified queue —
+    the orchestrator worker's _ensure_loaded is the SOLE authority that ever calls
+    `lms load`/`unload` (single-VRAM invariant, GPU_QUEUE.md). We submit a no-op
+    task with model=... so the worker loads it (serialized against image/video),
+    then poll. Never touches lms/SSH directly. Returns {ok, loaded, context, note}.
+    (context/unload_first kept for API compat; residency + context are the worker's job.)"""
+    if not model:
+        return {"ok": False, "loaded": None, "note": "no model given"}
     try:
-        loaded = _loaded_llms() or []
-        if model in loaded:
+        if model in (_loaded_llms() or []):
             return {"ok": True, "loaded": model, "context": _loaded_context(model), "note": "already resident"}
-        # Only unload if a DIFFERENT model occupies VRAM (never nuke a free GPU — a failed
-        # reload would then leave nothing to borrow). `lms load` is flaky over SSH, so retry.
-        others = [m for m in loaded if m != model]
-        if others and unload_first:
-            _ssh(LMS, "unload", "--all", timeout=30)
+        tid = orch.submit_llm(lambda: True, desc=f"swarm: load {model}", model=model, priority=2)
+        while True:
+            p = orch.poll(tid)
+            if p["status"] in ("done", "error", "cancelled", "not_found"):
+                break
             time.sleep(1)
-        last = ""
-        for attempt in range(3):
-            args = [LMS, "load", model, "--gpu", "max", "-y"]
-            if attempt < 2:                      # try with explicit context first two attempts
-                args[3:3] = ["-c", str(context)]
-            rc, last = _ssh(*args, timeout=300)
-            for _ in range(6):
-                if model in (_loaded_llms() or []):
-                    ctx = _loaded_context(model)
-                    return {"ok": True, "loaded": model, "context": ctx or context,
-                            "note": None if attempt == 0 else f"loaded on retry {attempt+1}"}
-                time.sleep(3)
-        return {"ok": False, "loaded": None, "note": (last or "load failed after 3 tries")[:200]}
+        if p["status"] == "done":
+            return {"ok": True, "loaded": model, "context": _loaded_context(model), "note": "loaded via queue"}
+        return {"ok": False, "loaded": None, "note": (p.get("error") or f"load {p['status']}")[:200]}
     except Exception as e:
         return {"ok": False, "loaded": None, "note": str(e)[:200]}
 
@@ -156,11 +148,13 @@ def _turn(model: str, system: str, user: str, max_tokens: int = 2000) -> str:
     else borrows the resident one. Reasoning models get a bigger budget (they spend
     tokens thinking) and their scratchpad is stripped from the returned text."""
     def work():
-        actual = _resolve_model(model)
-        orch._current_llm_model = actual or model
-        budget = max_tokens * 2 if _is_thinking(actual or model) else max_tokens
+        # The orchestrator worker has ALREADY made `model` the sole resident LLM
+        # (submit_llm(model=...) → _ensure_loaded) and set orch._current_llm_model.
+        # We only run inference here — the swarm never loads/swaps models itself.
+        budget = max_tokens * 2 if _is_thinking(model) else max_tokens
         return _call_lmstudio(system, user, budget)
-    tid = orch.submit_llm(work, desc="swarm turn", priority=2)   # background dev-swarm
+    # Pass model= so the SINGLE worker loads it via the unified queue (never raw lms).
+    tid = orch.submit_llm(work, desc="swarm turn", model=model, priority=2)   # background dev-swarm
     while True:
         p = orch.poll(tid)
         if p["status"] in ("done", "error", "cancelled", "not_found"):

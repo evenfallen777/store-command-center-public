@@ -23,6 +23,16 @@ def save_world_settings(body: dict = Body(...)):
     return {"ok": True, "settings": ws.get_all()}
 
 
+@router.get("/api/world/theme")
+def get_naming_theme():
+    """READ-ONLY: the active naming theme ('themed' default | 'neutral') + its
+    resolved role→{label,icon} map (app/naming_theme.py). Display labels only —
+    saving goes through the normal PATCH /api/settings flow (key `naming_theme`);
+    no internal id/actor/endpoint is affected by any value here."""
+    import naming_theme
+    return naming_theme.client_state()
+
+
 @router.post("/api/world/cognition")
 def run_cognition_now():
     """Manually trigger a cognition batch (respects the enabled/guardrail flags)."""
@@ -122,9 +132,28 @@ def world_state():
     except Exception:
         pass
     conn.close()
+    # 😈 NSFW video store (map building): visible/open ONLY when BOTH existing gates
+    # agree — Satan's world_satan_nsfw_domain toggle AND the layered nsfw.world_active()
+    # (master + world switches). This merely READS the gates; nothing here (or in the
+    # client) can flip them. Any failure → False (fail closed → boarded-up shop).
+    try:
+        import world_satan
+        import nsfw
+        nsfw_store_open = bool(world_satan.nsfw_domain_on() and nsfw.world_active())
+    except Exception:
+        nsfw_store_open = False
     activity, _ = wd.live_activity()
+    # naming theme (display labels only — see app/naming_theme.py); the client
+    # keeps its WTheme mirror synced from this on every poll. Fail ⇒ default.
+    try:
+        import naming_theme
+        _naming = naming_theme.theme()
+    except Exception:
+        _naming = "themed"
     return {
         "now": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "naming_theme": _naming,
+        "nsfw_store_open": nsfw_store_open,
         "clock_hour": int(time.strftime("%H")),
         "departments": [{"key": k, "label": v[0], "color": v[1]} for k, v in wd.DEPARTMENTS.items()],
         "work_types": [{"key": wt, **world_work.WT_META[wt]} for wt in world_work.WORK_TYPES],

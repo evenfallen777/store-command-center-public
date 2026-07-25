@@ -98,10 +98,25 @@ check_gpu(){
 
 # ── system dependencies ──────────────────────────────────────────────────────
 setup_system(){
-  local pkgs=(python3 python3-venv python3-pip git ffmpeg build-essential wget curl jq libgl1 libglib2.0-0)
-  local need_cmds=(python3 git ffmpeg wget curl jq)
+  # python3-dev added: needed to compile PyMCubes/pyopencl from source (3D + miner).
+  local pkgs=(python3 python3-venv python3-pip python3-dev git ffmpeg build-essential wget curl jq libgl1 libglib2.0-0)
   local missing=()
-  for p in "${need_cmds[@]}"; do have "$p" || missing+=("$p"); done
+  # skip-if-partially-present class: `have()` only sees commands on $PATH, but
+  # several pkgs above (python3-venv, python3-pip, python3-dev, build-essential,
+  # libgl1, libglib2.0-0) install NO binary — a box can have python3/git/ffmpeg/
+  # wget/curl/jq present yet be missing python3-venv, which used to make this
+  # skip apt entirely, then every downstream `python3 -m venv` failed silently
+  # (script runs under `set -uo pipefail`, not `-e`). Check every pkg the way it
+  # can actually be detected: `have` for ones with a same-named binary, `dpkg -s`
+  # for the library/dev packages that don't.
+  for p in "${pkgs[@]}"; do
+    case "$p" in
+      python3-venv|python3-pip|python3-dev|build-essential|libgl1|libglib2.0-0)
+        dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+      *)
+        have "$p" || missing+=("$p") ;;
+    esac
+  done
   if [ "$MODE" != "deploy" ]; then
     [ ${#missing[@]} -eq 0 ] && ok "core system tools present" || warn "missing: ${missing[*]} (run: deploy)"
     return
@@ -163,9 +178,13 @@ setup_comfyui(){
     return
   fi
   info "ComfyUI (image generation)…"
+  # skip-if-partially-present class (see ftfy/video-gen fix): torch alone can
+  # import even when `pip install -r requirements.txt` died partway on a prior
+  # run, which would make a broken install read as "healthy" forever. Check a
+  # spread of core ComfyUI requirements, not just torch.
   local healthy=0
   [ -f "$COMFY_DIR/main.py" ] && [ -x "$COMFY_DIR/venv/bin/python3" ] && \
-    "$COMFY_DIR/venv/bin/python3" -c "import torch" >/dev/null 2>&1 && healthy=1
+    "$COMFY_DIR/venv/bin/python3" -c "import torch, torchsde, einops, transformers, safetensors, aiohttp" >/dev/null 2>&1 && healthy=1
   if [ "$healthy" = "1" ]; then
     ok "ComfyUI already installed — skipping reinstall (won't touch working packages)"
   else
@@ -201,7 +220,7 @@ setup_video(){
   fi
   info "Video generation (diffusers) …"
   [ -x "$PY" ] || { err "ComfyUI venv missing — run ComfyUI setup first"; set_result video failed; return; }
-  if "$PY" -c "import diffusers,imageio_ffmpeg" >/dev/null 2>&1; then
+  if "$PY" -c "import diffusers,imageio_ffmpeg,ftfy" >/dev/null 2>&1; then
     ok "diffusers media stack already present — skipping reinstall"
   else
     "$PY" -m pip install -q diffusers transformers accelerate imageio imageio-ffmpeg ftfy safetensors >>"$LOG" 2>&1 || warn "diffusers deps had issues"
@@ -261,8 +280,14 @@ setup_3d(){
   ok "TripoSR ready (CPU mesh path; weights download on first use)"; set_result model3d ok
 
   # ── TripoSG (MIT, higher quality) — diso patched to the CPU extractor ──
+  # skip-if-partially-present class: the venv's python3 binary exists the instant
+  # `python3 -m venv` finishes inside install_triposg.sh, well before the trailing
+  # `pip install -r` of TripoSG's actual requirements — so a failed payload install
+  # used to read as "already installed" forever. Gate on the completion marker the
+  # install script only writes after that pip install succeeds (set -euo pipefail
+  # there means it never reaches the marker line on failure).
   if [ -f "$M3D_TOOLS/install_triposg.sh" ]; then
-    if [ -x "$TRIPOSG_DIR/venv/bin/python3" ]; then ok "TripoSG already installed"
+    if [ -f "$TRIPOSG_DIR/.install_complete" ]; then ok "TripoSG already installed"
     else info "TripoSG (MIT, higher quality) …"
       bash "$M3D_TOOLS/install_triposg.sh" >>"$LOG" 2>&1 && ok "TripoSG ready" || warn "TripoSG install had issues (see log)"
     fi
@@ -384,19 +409,31 @@ setup_guard_miner(){
   if [ -f "$HERE/gpu-guard.sh" ]; then
     install -m 755 "$HERE/gpu-guard.sh" "$HOME/gpu-guard.sh" && ok "installed gpu-guard.sh"
   fi
+  # OpenCL runtime + BUILD HEADERS — must be ensured BEFORE the pyopencl pip
+  # install below, not after: pyopencl is a source build and needs CL/cl.h at
+  # build time. The old order (pip install pyopencl, THEN apt the runtime lib)
+  # meant a from-scratch node's first pyopencl build always failed for lack of
+  # headers. ocl-icd-libopencl1 alone is only the runtime dispatcher — it never
+  # provided the dev headers, so also apt ocl-icd-opencl-dev + opencl-headers.
+  local ocl_runtime_ok=0 ocl_headers_ok=0
+  ldconfig -p 2>/dev/null | grep -q libOpenCL && ocl_runtime_ok=1
+  [ -f /usr/include/CL/cl.h ] && ocl_headers_ok=1
+  if [ "$ocl_runtime_ok" != "1" ] || [ "$ocl_headers_ok" != "1" ]; then
+    APT install -y ocl-icd-libopencl1 ocl-icd-opencl-dev opencl-headers clinfo >/dev/null 2>&1 || \
+      warn "OpenCL runtime/headers missing — install ocl-icd-libopencl1 ocl-icd-opencl-dev opencl-headers for the miner"
+  fi
   # miner script + its own venv (OpenCL — deliberately separate from the AI venvs)
   [ -f "$HERE/jellyminer.py" ] && install -m 644 "$HERE/jellyminer.py" "$HOME/jellyminer.py"
-  if [ ! -x "$HOME/jellyminer-venv/bin/python" ]; then
+  # skip-if-partially-present class: venv/bin/python existing only proves
+  # `python3 -m venv` finished, not that the trailing `pip install` of the
+  # actual payload (pyopencl/numpy/requests) succeeded. Gate on those imports.
+  if [ ! -x "$HOME/jellyminer-venv/bin/python" ] || \
+     ! "$HOME/jellyminer-venv/bin/python" -c "import pyopencl, numpy, requests" >/dev/null 2>&1; then
     python3 -m venv "$HOME/jellyminer-venv" >>"$LOG" 2>&1 && \
       "$HOME/jellyminer-venv/bin/pip" install -q pyopencl numpy requests >>"$LOG" 2>&1 && \
       ok "JellyMiner venv ready" || warn "JellyMiner venv install had issues (see $LOG)"
   else
     ok "JellyMiner venv already present"
-  fi
-  # OpenCL loader (the NVIDIA driver ships the ICD; this is just the dispatcher)
-  if ! ldconfig -p 2>/dev/null | grep -q libOpenCL; then
-    APT install -y ocl-icd-libopencl1 clinfo >/dev/null 2>&1 || \
-      warn "libOpenCL missing — install ocl-icd-libopencl1 for the miner"
   fi
   # miner unit: never overwrite an existing one (it may carry a literal token)
   if [ ! -f "$UNITS/jellyminer.service" ]; then

@@ -6,7 +6,7 @@
 
    Sub-tabs (same pane-toggle mechanism as Crypto/Settings — everything stays in the
    DOM, we only switch which pane is visible, and each pane lazy-loads once):
-     🏆 Leaderboard — ranked analysts + run-a-round controls + live progress
+     🏆 Forecaster Leaderboard — ranked analysts + run-a-round controls + live progress
      🔮 Open calls  — predictions still awaiting their horizon
      📊 Results     — resolved predictions, scored ✓/✗ */
 
@@ -22,10 +22,11 @@ async function renderOracle() {
       <div class="view-title">&#128302; Oracle</div>
       <div class="view-sub">A forecasting tournament &mdash; LLM analysts compete to predict crypto &amp;
         stock prices, get scored on accuracy and how far out they called it, remember their lessons,
-        and climb a leaderboard. Nothing here trades real money.</div>
+        and climb a leaderboard. Nothing here trades real money.<br>
+        Looking for your town's leaderboard? That's on The Company tab &rarr; &#127970; Company panel.</div>
     </div>
     <div class="subtab-bar" id="oracle-subtabs">
-      <div class="subtab active" onclick="oracleSub('leaderboard')">&#127942; Leaderboard</div>
+      <div class="subtab active" onclick="oracleSub('leaderboard')">&#127942; Forecaster Leaderboard</div>
       <div class="subtab" onclick="oracleSub('open')">&#128302; Open calls</div>
       <div class="subtab" onclick="oracleSub('results')">&#128202; Results</div>
     </div>
@@ -115,14 +116,15 @@ function _orConfBar(c) {
 /* ── 🏆 LEADERBOARD ───────────────────────────────────────────────────────── */
 async function oracleLoadLeaderboard() {
   const pane = document.getElementById('pane-oracle-leaderboard');
-  let d, llmOpts = [], orSt = null;
+  let d, llmOpts = [], orSt = null, orAssets = null;
   try {
-    const [dd, lm, st] = await Promise.all([
+    const [dd, lm, st, as] = await Promise.all([
       api('/api/oracle/leaderboard'),
       api('/api/settings/llm-models').catch(() => ({ models: [] })),
       api('/api/oracle/settings').catch(() => null),   // graceful: null until the server restart
+      api('/api/oracle/assets').catch(() => null),     // graceful: null until the server restart
     ]);
-    d = dd; llmOpts = lm.models || []; orSt = st;
+    d = dd; llmOpts = lm.models || []; orSt = st; orAssets = as;
   }
   catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
   const lb = d.leaderboard || [];
@@ -161,48 +163,52 @@ async function oracleLoadLeaderboard() {
 
   pane.innerHTML = `
     <div class="section-header">
-      <div><div class="section-title">&#127942; Leaderboard</div>
+      <div><div class="section-title">&#127942; Forecaster Leaderboard</div>
         <div class="section-sub">Models compete to forecast prices with a LADDER of calls per asset
           (1d / 3d / 5d / 1w / 2w). Every rung scores independently on direction + horizon-scaled closeness
           &mdash; a correct 2-week call beats a correct 1-day call modestly.</div></div>
       <button class="btn-sm" onclick="_oracleLoaded.leaderboard=false;oracleSub('leaderboard')">&#8635; Refresh</button>
     </div>
 
-    <div class="settings-group" style="max-width:900px;margin-bottom:16px;border-color:var(--accent);">
-      <div class="settings-group-title">&#128302; Run a tournament round</div>
-      <div style="font-size:.76rem;color:var(--muted);margin-bottom:10px;">
-        Each active analyst studies the market and makes a fresh forecast for the chosen number of assets.
-        Calls resolve automatically once their horizon arrives &mdash; or hit <b>Resolve due now</b> to score any that are ready.
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <label style="font-size:.76rem;color:var(--muted);">How many assets:
-          <input type="number" id="or-round-n" min="1" max="12" value="3" style="width:64px;margin-left:4px;"
-            title="How many different assets each analyst forecasts this round (1–12).">
-          ${hlp('Each active analyst makes one forecast per asset. More assets = a bigger, slower round.')}</label>
-        <button class="btn-sm primary" id="or-round-btn" onclick="oracleStartRound()">&#128302; Run tournament round</button>
-        <button class="btn-sm" id="or-resolve-btn" onclick="oracleResolve()"
-          title="Score any open predictions whose horizon date has already passed.">&#9878;&#65039; Resolve due now</button>
-      </div>
-      <div id="or-round-status" style="margin-top:10px;"></div>
-    </div>
-
-    ${_orSettingsGroup(orSt)}
-
     ${lb.length ? `
-    <div class="settings-group" style="max-width:900px;overflow-x:auto;">
+    <div class="settings-group" style="max-width:900px;overflow-x:auto;margin-bottom:16px;">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
         <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
           <th style="padding:6px 10px;">#</th><th style="padding:6px 10px;">Analyst</th>
-          <th style="padding:6px 10px;text-align:right;">Score</th>
-          <th style="padding:6px 10px;text-align:right;">Accuracy</th>
+          <th style="padding:6px 10px;text-align:right;">Score ${hlp('Points for calling direction right + how close the price was; not a dollar amount — nothing here trades real money.')}</th>
+          <th style="padding:6px 10px;text-align:right;">Accuracy ${hlp('Share of this analyst\'s resolved calls that landed on the right side of the price.')}</th>
           <th style="padding:6px 10px;text-align:right;">Resolved</th>
           <th style="padding:6px 10px;text-align:right;">Open</th>
-          <th style="padding:6px 10px;text-align:right;">Avg horizon</th>
+          <th style="padding:6px 10px;text-align:right;">Avg horizon ${hlp('How many days out this analyst typically calls — longer correct calls score higher.')}</th>
           <th style="padding:6px 10px;text-align:right;"></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`
     : `<div class="empty"><div class="empty-icon">&#128302;</div>Run your first tournament round to see analysts compete.</div>`}
+
+    <details class="settings-group" style="max-width:900px;margin-bottom:16px;">
+      <summary style="cursor:pointer;font-weight:700;">&#9881;&#65039; Round settings</summary>
+      <div class="settings-group" style="max-width:900px;margin:12px 0 0 0;border-color:var(--accent);">
+        <div class="settings-group-title">&#128302; Run a tournament round</div>
+        <div style="font-size:.76rem;color:var(--muted);margin-bottom:10px;">
+          Each active analyst studies the market and makes a fresh forecast for the chosen number of assets.
+          Calls resolve automatically once their horizon arrives &mdash; or hit <b>Resolve due now</b> to score any that are ready.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <label style="font-size:.76rem;color:var(--muted);">How many assets:
+            <input type="number" id="or-round-n" min="1" max="12" value="3" style="width:64px;margin-left:4px;"
+              title="How many different assets each analyst forecasts this round (1–12).">
+            ${hlp('Each active analyst makes one forecast per asset. More assets = a bigger, slower round.')}</label>
+          <button class="btn-sm primary" id="or-round-btn" onclick="oracleStartRound()">&#128302; Run tournament round</button>
+          <button class="btn-sm" id="or-resolve-btn" onclick="oracleResolve()"
+            title="Score any open predictions whose horizon date has already passed.">&#9878;&#65039; Resolve due now</button>
+        </div>
+        <div id="or-round-status" style="margin-top:10px;"></div>
+      </div>
+
+      ${_orSettingsGroup(orSt)}
+      ${_orAssetsGroup(orAssets)}
+    </details>
     ${_orManage(lb, llmOpts)}`;
 
   if (_oracleRoundPoll) oraclePollRound();   // resume the live progress view if a round is running
@@ -263,6 +269,116 @@ async function oracleSaveSettings() {
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
 window.oracleSaveSettings = oracleSaveSettings;
+
+/* ── 🎯 what we predict: owner-editable crypto + stock asset set ─────────────
+   Crypto needs a CoinGecko id per symbol to resolve a real price for scoring
+   (see routers/oracle/_base.py crypto_ids), so adding one takes symbol + id.
+   Stocks reuse the same stocks_watchlist setting the Crypto tab edits. */
+function _orAssetChip(label, onRemove, title) {
+  return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:.72rem;font-weight:600;
+    color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:3px 6px 3px 10px;margin:3px 6px 3px 0;" ${title ? `title="${esc(title)}"` : ''}>
+    ${esc(label)}
+    <button onclick="${onRemove}" title="Remove"
+      style="border:none;background:none;color:var(--muted);cursor:pointer;font-size:.85rem;line-height:1;padding:2px 4px;">&times;</button>
+  </span>`;
+}
+function _orAssetsGroup(as) {
+  if (!as) {
+    return `<div class="settings-group" style="max-width:900px;margin-bottom:16px;">
+      <div class="settings-group-title">&#127919; What we predict</div>
+      <div style="font-size:.74rem;color:var(--muted);">Asset config API not reachable yet
+        (pending a server restart) &mdash; tracking today's defaults: BTC / ETH / SOL / XRP / DOGE
+        + your stock watchlist.</div></div>`;
+  }
+  const cryptoChips = Object.entries(as.crypto || {}).map(([sym, id]) =>
+    _orAssetChip(sym, `oracleRemoveCrypto('${esc(sym)}')`, `CoinGecko id: ${id}`)).join('');
+  const stockChips = (as.stocks || []).map(sym =>
+    _orAssetChip(sym, `oracleRemoveStock('${esc(sym)}')`)).join('');
+  return `
+    <div class="settings-group" style="max-width:900px;margin-bottom:16px;">
+      <div class="settings-group-title">&#127919; What we predict</div>
+      <div style="font-size:.74rem;color:var(--muted);margin-bottom:10px;">
+        The tournament forecasts these assets each round. Defaults are BTC / ETH / SOL / XRP / DOGE
+        &mdash; add or remove crypto and stocks here.</div>
+
+      <div style="font-size:.72rem;font-weight:700;color:var(--text);margin-bottom:2px;">Crypto</div>
+      <div style="margin-bottom:8px;">${cryptoChips || '<span style="color:var(--muted);font-size:.74rem;">none tracked</span>'}</div>
+      <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;">
+        <div class="field" style="margin:0;">
+          <label style="font-size:.7rem;">Symbol
+            <input type="text" id="or-add-crypto-sym" placeholder="KAS" maxlength="12" style="width:80px;"></label>
+        </div>
+        <div class="field" style="margin:0;">
+          <label style="font-size:.7rem;">CoinGecko id ${hlp('The id CoinGecko uses for this coin — open the coin\'s page on coingecko.com and take the last part of the URL, e.g. coingecko.com/en/coins/kaspa → id is "kaspa". Needed so the Oracle can fetch a real price to score the calls against.')}
+            <input type="text" id="or-add-crypto-id" placeholder="kaspa" style="width:120px;"></label>
+        </div>
+        <button class="btn-sm primary" onclick="oracleAddCrypto()">&#10133; Add crypto</button>
+        <a href="https://www.coingecko.com/" target="_blank" rel="noopener" style="font-size:.7rem;color:var(--accent);text-decoration:none;">Find an id on CoinGecko &#8599;</a>
+      </div>
+
+      <div style="font-size:.72rem;font-weight:700;color:var(--text);margin-bottom:2px;">Stocks ${hlp('Shared with the Crypto tab → Stocks → Watchlist — editing here updates the same list.')}</div>
+      <div style="margin-bottom:8px;">${stockChips || '<span style="color:var(--muted);font-size:.74rem;">none on the watchlist</span>'}</div>
+      <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field" style="margin:0;">
+          <label style="font-size:.7rem;">Ticker
+            <input type="text" id="or-add-stock-sym" placeholder="AAPL" maxlength="10" style="width:90px;"></label>
+        </div>
+        <button class="btn-sm primary" onclick="oracleAddStock()">&#10133; Add stock</button>
+      </div>
+    </div>`;
+}
+
+function _orAssetsReload() {
+  _oracleLoaded.leaderboard = false;
+  oracleSub('leaderboard');
+}
+
+async function oracleAddCrypto() {
+  const symbol = document.getElementById('or-add-crypto-sym')?.value.trim();
+  const coingecko_id = document.getElementById('or-add-crypto-id')?.value.trim();
+  if (!symbol || !coingecko_id) { toast('Symbol and CoinGecko id are both required', 'error'); return; }
+  try {
+    await api('/api/oracle/assets/crypto', { method: 'POST', body: JSON.stringify({ symbol, coingecko_id }) });
+    toast(`${symbol.toUpperCase()} added ✓`);
+    _orAssetsReload();
+  } catch (e) { toast('Add failed: ' + e.message, 'error'); }
+}
+window.oracleAddCrypto = oracleAddCrypto;
+
+async function oracleRemoveCrypto(symbol) {
+  try {
+    await api('/api/oracle/assets/crypto/' + encodeURIComponent(symbol), { method: 'DELETE' });
+    toast(`${symbol} removed`);
+    _orAssetsReload();
+  } catch (e) { toast('Remove failed: ' + e.message, 'error'); }
+}
+window.oracleRemoveCrypto = oracleRemoveCrypto;
+
+async function oracleAddStock() {
+  const sym = document.getElementById('or-add-stock-sym')?.value.trim().toUpperCase();
+  if (!sym) { toast('Enter a ticker', 'error'); return; }
+  try {
+    const cur = await api('/api/oracle/assets');
+    const syms = new Set(cur.stocks || []);
+    syms.add(sym);
+    await api('/api/crypto/settings', { method: 'POST', body: JSON.stringify({ stocks_watchlist: [...syms].join(',') }) });
+    toast(`${sym} added ✓`);
+    _orAssetsReload();
+  } catch (e) { toast('Add failed: ' + e.message, 'error'); }
+}
+window.oracleAddStock = oracleAddStock;
+
+async function oracleRemoveStock(symbol) {
+  try {
+    const cur = await api('/api/oracle/assets');
+    const syms = (cur.stocks || []).filter(s => s !== symbol);
+    await api('/api/crypto/settings', { method: 'POST', body: JSON.stringify({ stocks_watchlist: syms.join(',') }) });
+    toast(`${symbol} removed`);
+    _orAssetsReload();
+  } catch (e) { toast('Remove failed: ' + e.message, 'error'); }
+}
+window.oracleRemoveStock = oracleRemoveStock;
 
 /* ── 🧑‍🔬 manage analysts: add / retire / change model ── */
 function _orModelSel(id, current, llmOpts) {

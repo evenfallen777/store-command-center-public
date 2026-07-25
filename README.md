@@ -1,14 +1,5 @@
 # Store Command Center
 
-> 🚧 **v2 is on the way.** A major update is in active development — a **Video Studio**
-> (storyboard → matched, layered audio → export), **multi-platform social publishing**
-> (YouTube / TikTok / Instagram), an autonomous **content loop**, and a reworked control
-> panel with an **agent-loops graph** and optional god-tier **lieutenants** (✝️ Jesus and
-> 😈 Satan — a constructive and an adversarial reviewer that give every prediction a
-> best- *and* worst-case). See **[CHANGELOG.md](CHANGELOG.md)** for the running feature +
-> fix list. `main` tracks the current stable line; v2 lands when it's ready. Everything
-> autonomous is gated and defaults **off**; the money and content-safety floors never move.
-
 A self-hosted **AI company-in-a-box**: a FastAPI + SQLite dashboard that runs a real
 print-on-demand / resale / services operation end-to-end on your own hardware — and a
 pixel-art company town, **The Company**, whose agents *are* the operation. Every image,
@@ -20,13 +11,13 @@ No cloud services required. The only external dependency is a GPU machine runnin
 **LM Studio** (LLM) and **ComfyUI** + Python model stacks (image / video / audio / 3D) —
 same box or another machine on your LAN.
 
-![The Company — the pixel-art town that runs the store](docs/screenshots/the-company.png)
+![The Company — the pixel-art town that runs the store](docs/screenshots/01_world.jpg)
 
 📖 **[Full documentation is in the wiki](../../wiki)** — per-system deep dives, the
 complete [gates and toggles reference](../../wiki/Gates-and-toggles), install
 walkthroughs and troubleshooting.
 
-- [Screenshots](#screenshots)
+- [Feature Tour](#feature-tour)
 - [Systems](#systems)
 - [The Company — the game that runs the store](#the-company--the-game-that-runs-the-store)
 - [The buddy system](#the-buddy-system)
@@ -42,12 +33,22 @@ walkthroughs and troubleshooting.
 
 ---
 
-## Screenshots
+## Feature Tour
+
+A curated walk through the tabs — there are twenty of them, so this is the highlight
+reel. Every tab and sub-tab has its own shot in the
+[wiki's Systems page](../../wiki/Systems).
 
 | | |
 |---|---|
-| ![Dashboard](docs/screenshots/dashboard.png) *Dashboard — pipeline, swarm and services at a glance* | ![Studio](docs/screenshots/studio.png) *Studio — local image generation + the design pipeline* |
-| ![God Console](docs/screenshots/god-console.png) *God Console — bless or deny everything the agents ask for* | ![Knowledge Graph](docs/screenshots/knowledge-graph.png) *Knowledge Graph — the whole codebase, queryable* |
+| ![Dashboard](docs/screenshots/00_dashboard.jpg) *Dashboard — pipeline, queue, swarm and services at a glance* | ![GitHub & Dev Swarm](docs/screenshots/13_github.jpg) *GitHub & Dev Swarm — "The Engineers": repos, workboard and the dev → master → retail pipeline* |
+| ![Dev Swarm — a job running](docs/screenshots/13_github__03_swarm.jpg) *The swarm at work — a local model plans and edits in a workspace; you review the diff* | ![God Console — Prayers](docs/screenshots/02_command__06_god.jpg) *God Console — anything that costs money or touches the world files a prayer you bless or deny* |
+| ![Master Breaker](docs/screenshots/02_command__00_breakers.jpg) *Master Breaker — every gate, switch and automation on one page, locked rows included* | ![Studio](docs/screenshots/05_studio.jpg) *Studio — image, video, audio and 3D generation on your own GPU* |
+| ![Finance](docs/screenshots/03_finance.jpg) *Finance — net worth, P&L, bills, treasury, wallets and markets under one roof* | ![Oracle](docs/screenshots/04_oracle.jpg) *Oracle — a forecasting tournament between local models; no money moves* |
+| ![Etsy / Printify](docs/screenshots/07_etsy-printify.jpg) *Etsy / Printify — trend scan → design → review → approve → publish* | ![Resell](docs/screenshots/12_resell.jpg) *Resell — photograph an item → AI listing → post through a real logged-in browser* |
+| ![Portal → WordPress](docs/screenshots/08_portal.jpg) *Portal — curate affiliate and generated products, push to your WooCommerce site* | ![Mail & Quotes](docs/screenshots/10_mail.jpg) *Mail & Quotes — LLM-drafted service quotes from your own mailbox, sent after review* |
+| ![Network Security — Red/Blue](docs/screenshots/16_network-security__01_redblue.jpg) *Red team / Blue team — a look-only auditor files findings; fixes route through the gated dev swarm* | ![Knowledge](docs/screenshots/18_knowledge.jpg) *Knowledge — the library, web archive, research lab and queryable repo graph in one hub* |
+| ![AI Assistant](docs/screenshots/17_agent.jpg) *AI Assistant — a tooled agent over the whole API, with per-category approval* | ![Social](docs/screenshots/09_social.jpg) *Social — drafts, YouTube/TikTok publishing, and post analytics feeding the taste model* |
 
 ---
 
@@ -64,7 +65,8 @@ DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 |---|---|
 | **📊 Dashboard** | Landing overview: pipeline stats, running generations, dev-swarm rollup, services up/down, plus the universal GPU queue controls (also pinned bottom-left everywhere). |
 | **🌅 The Company** | The pixel-art town that *is* the operations layer — see [its section below](#the-company--the-game-that-runs-the-store). |
-| **💰 Finance** | One roof for all money, with seven panes: **Overview** (net worth across every rail), **P&L**, **Bills** (real recurring household bills and due dates), **Treasury** (the company books, operations ledger and PayPal), **Missions & Earn**, **Wallets**, and **Markets**. |
+| **⚡ Command** | The God Console as a standalone tab, no game canvas required. The **Master Breaker** puts every gate, switch and automation on one page (locked rows shown honestly); alongside it sit the prayer queue, the per-agent **caps catalog**, a live **agent-loops graph**, the Republic, workboard, roster, finances, research and schedule. Two god-tier lieutenants live here too: ✝️ **Jesus** (constructive autopilot, file-only publish caps, paid actions excluded) and 😈 **Satan** (the adversarial worst-case mirror, whose verdicts widen every review into a best/worst/expected band) — both **default off**, both fenced by the same money and content floors as everyone else. |
+| **💰 Finance** | One roof for all money, with seven panes: **Overview** (net worth across every rail), **P&L**, **Bills** (real recurring household bills and due dates), **Treasury** (the company books, operations ledger and PayPal), **Missions & Earn**, **Wallets**, and **Markets**. **Income** tracking lives here too: any income type with manual entry, plus read-only PayPal / Printify / on-chain importers (importer daemon default **off**; there is no spend path). |
 | **🔮 Oracle** | A forecasting **tournament** between local LLM models: each "analyst" researches real-world catalysts, predicts direction/target/horizon, gets auto-scored when the horizon arrives, and learns from its hits and misses. Leaderboard included; **no money moves.** |
 
 **Finance → Markets** is itself the markets desk: 📊 Stats · 🪼 **JellyCoin** ([below](#jellycoin-jly--the-projects-own-coin)) · 🦪 **Pearl (PRL)**, a supported *external* proof-of-useful-work L1 · ⛓ **Nodes** (local regtest `bitcoind`) · ⛏ **Mining** · 🤖 **Trading** (freqtrade: LLM proposes → backtest → you approve; dry-run by default) · 📈 **Stocks** · 🔑 encrypted **key backups**.
@@ -76,7 +78,7 @@ DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 | System | What it does |
 |---|---|
 | **🎨 Image** | ComfyUI / SDXL generation with per-product-type LoRA + upscaler selection, prompt enhancement, sticker background knockout, and the design review pipeline. |
-| **🎬 Video** | Local diffusers generation (Wan / LTX / CogVideoX …) with live progress, cancel/retry, multi-clip **chains**, and a **video→audio bridge** that scores a clip with music and optional narration. |
+| **🎬 Video** | Local diffusers generation (Wan / LTX / CogVideoX …) with live progress, cancel/retry, multi-clip **chains** (segments conformed to a uniform size before compile), a **video→audio bridge** that scores a clip with music and optional narration, and the **Video Studio**: storyboard → scenes and shots → layered audio (voiceover + music) → export. Per-model **VRAM gates** stop oversized video models with a clear message instead of an OOM. |
 | **🎵 Audio** | Music and voice: MusicGen, MMS-TTS, Stable Audio, and **ACE-Step** full songs with vocals + lyrics. |
 | **🧩 3D** | Text/image → mesh (TripoSR / TripoSG / Hunyuan / SF3D / TRELLIS), rendered and reviewed before it enters the Cults3D pipeline. |
 | **⚡ Queue** | The unified GPU queue in full-page form. Each engine pane also carries its own model catalog with one-click downloads, install/test buttons and idle-unload TTLs. |
@@ -90,14 +92,14 @@ DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 | **🖨️ Cults3D** | The 3D-printables pipeline: scan a backlog of STL files → CPU turntable renders + SDXL hero images → AI-proposed listings → approve → publish via Cults3D's API. |
 | **📷 Resell** | Physical-item flipping: photograph an item → vision-model analysis → AI listing content → post to marketplaces through a **real Chrome browser** (CDP automation with your logged-in profile), plus an offers inbox with AI-drafted haggling replies. |
 | **🌐 Portal → WordPress** | Curates affiliate/external products, software and generated media from nine sources and pushes the picks to your own WooCommerce/WordPress site. Curate-then-push — you pick what goes live. |
-| **📱 Social** | Drafts posts and captions from store media with the local LLM. |
+| **📱 Social** | Drafts posts and captions from store media with the local LLM — and now **publishes**: YouTube and TikTok are wired end-to-end (connect → private test post → publish), a Meta/Instagram adapter (IG Reels + FB Page) is included, post **analytics flow back into the taste model**, and a **gated auto-scheduler** (default off) posts scheduled drafts at their set time. NSFW content is hard-blocked from every social surface. |
 | **✉️ Mail & Quotes** | Reads a self-hosted mailbox (IMAP), drafts labor/service quotes with the local LLM under your business terms, and sends replies — each one reviewed first. |
 
 ### 🐙 Dev
 
 | System | What it does |
 |---|---|
-| **🐙 GitHub / Dev Swarm** | Repo management via the `gh` CLI plus a **local-model coding swarm**: file a job, a local LLM plans and edits code in a workspace, you review the diff, and promotion flows dev → master → **retail** (the public branch, produced by an automated identifier scrub whose leak gate blocks the push if anything private survives). Includes the workboard, cron and reviewer config. |
+| **🐙 GitHub / Dev Swarm** | Repo management via the `gh` CLI plus **The Engineers** — the local-model coding crew: file a job on the per-project **workboard**, a local LLM plans and edits code in a workspace, you review the diff, and the **pipeline** promotes dev → master → **retail** (the public branch, produced by an automated identifier scrub whose leak gate blocks the push if anything private survives). Human collaborators get a **collab** branch that merges through the same review lane. Sub-views cover the board, repos, the workflow, the live swarm, cron, the Agent Watcher and per-agent roles. |
 | **🩺 Agent Watcher** | A background doctor for the automation: detects failed / paused / stalled swarm and media jobs, diagnoses them (optionally with the LLM), and feeds the diagnosis back into the coder's context on re-run. |
 | **🎮 Games** | A game-engine workbench on the GPU node: Godot / Unity / Unreal install state, project management, asset wiring, headless builds, and editor control over MCP. |
 
@@ -108,7 +110,7 @@ DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 | **⚡ Unified GPU queue** | One orchestrator (`app/orchestrator.py` + a pure scheduling core with priority, model affinity and anti-starvation aging) serializes **everything** — LLM, image, video, audio, 3D, swarm, world — through the single GPU. Pause/resume/clear from any tab. |
 | **🛡 gpu-guard** | The GPU box heartbeats "a human is using me" (game, Blender, OBS, VM…) and the queue auto-pauses; auto-resumes when idle, and can never wedge shut if the guard dies. |
 | **🔌 Services** | A unified homelab hub: every Docker container and \*arr service grouped and controllable, with manual entries and overrides. |
-| **🛡️ Network Security** | A security command center across nine views (Command, Connections, Threats, Audit, Web Traffic, Guardian, AI Shield, Pi-hole DNS, System & LLM). The Command view drives **seven scheduled background defenses**, each with its own toggle and interval — all default **off** except backups. |
+| **🛡️ Network Security** | A security command center across nine views (Command, Connections, Threats, Audit, Web Traffic, Guardian, AI Shield, Pi-hole DNS, System & LLM). The Command view drives **seven scheduled background defenses**, each with its own toggle and interval — all default **off** except backups. On top sits the **Red team / Blue team** loop: a look-only adversarial auditor (no exploitation, ever) audits the store, site and system and files findings with CVE/OWASP references; the blue side routes fixes through the gated Engineers dev swarm; a findings lifecycle (open → triaged → fixing → fixed → verified) and a structured red↔blue Q&A channel keep the whole thing auditable. Default **off**, no auto-deploy, human approval before anything ships. |
 | **🔗 MCP server** | The whole API is mounted as an MCP server at `/api/mcp` (fastapi-mcp) — every endpoint becomes a tool, so an external agent framework on the same box can drive the entire store. An OpenAI-compatible LLM proxy (`/api/llm/v1/*`) routes outside callers through the same GPU queue. |
 | **🤝 Peers** | Federation between Store installs — see [The buddy system](#the-buddy-system). |
 
@@ -117,10 +119,8 @@ DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 | System | What it does |
 |---|---|
 | **🤖 AI Assistant** | A genuinely **tooled agent** in the UI: its tools are generated straight from the app's own API route table, so it can plan → call endpoints → observe → continue. Non-read calls are categorized (money / delete / publish / …) and pause for your approval in-chat; each category has an auto-approve toggle. Persistent conversations and reusable "skills" included. |
-| **🔬 Research Lab** | "Research Geniuses" — agents that run multi-step research projects (with optional image gathering/generation) and file the results into the Library. |
-| **📚 Library** | An offline knowledge base plus a full **web archive**: saving a page auto-escalates HTTP fetch → `wget` → your logged-in Store browser (clears walls a headless grab can't), or upload a saved `.html`. Re-saving builds a version history — a personal time machine. AI guides/summaries on top. |
-| **🕸 Knowledge Graph** | A queryable knowledge graph of the whole repo (built with graphify): stats, natural-language queries, path/affected analysis, and a native force-directed explorer. Build yours with `setup.sh --with-graphify`. |
-| **⚙️ Settings** | Eight panes: **System** (host/GPU-node admin, logs, restart), **Models**, **Integrations**, **Store & Content**, **Account**, **Prompts**, **Systems**, **Plugins**. |
+| **🧠 Knowledge** | One hub for three systems. The **Research Lab**: "Research Geniuses" — agents that run multi-step research projects (with optional image gathering/generation) and file the results into the Library. The **Library**: an offline knowledge base plus a full **web archive** — saving a page auto-escalates HTTP fetch → `wget` → your logged-in Store browser, re-saving builds a version history, AI guides/summaries on top. And the **Knowledge Graph**: the whole repo as a queryable graph (built with graphify) — natural-language queries, path/affected analysis, and a native force-directed explorer (`setup.sh --with-graphify`). |
+| **⚙️ Settings** | Eight panes: **System** (host/GPU-node admin, logs, restart), **Backups**, **Models**, **Integrations** (with a status board showing every connected service as active / needs-login / not-set-up), **Prompts**, **Systems**, **Plugins**, and **Interface** (hide any tab; turn the game layer on or off). |
 
 Three registries live under Settings and are worth calling out:
 
@@ -180,7 +180,9 @@ What's in the world:
   morale; mood has a real thought-ledger and mental breaks.
 - **Progression.** A research tree with prerequisites, a material tech ladder
   (wood → stone → bronze → iron → steel), a construction lifecycle for new buildings,
-  achievements, seasons, and a 24-hour town timetable.
+  achievements, seasons, and a 24-hour town timetable. The HQ itself evolves through
+  saved **progression stages** — the current era is an iron/steel-age rework of the
+  town, with ore and fishing venues to feed the material ladder.
 - **The town makes its own art.** Sprites are generated through a pixel-art pipeline
   (ComfyUI + a pixel-art LoRA) and judged by a vision model before they're used; the
   terrain itself is **progressively agent-painted** — individual tiles are generated
@@ -384,7 +386,9 @@ JellyMiner service on the node — model downloads, searxng for the Research tab
 mining rigs, external accounts).
 
 First login password is **`store`** (you'll set your own on first sign-in / in
-Settings). If you're behind a reverse proxy, see **Reverse proxy** below.
+Settings). A first-run **setup wizard** (`/setup`) then walks you through password →
+topology → node test → subsystems → health check. If you're behind a reverse proxy,
+see **Reverse proxy** below.
 
 ---
 

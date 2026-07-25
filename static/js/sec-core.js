@@ -25,8 +25,8 @@ async function renderNetworkSecurity() {
       <div class="view-sub">Who&rsquo;s connecting in &amp; out, who&rsquo;s knocking, your exposed surface &mdash; plus Pi-hole DNS guardian</div>
     </div>
     <div class="subtab-bar" id="sec-tabs">
-      ${['command','connections','threats','audit','web','guardian','ai','dns','system'].map(t =>
-        `<div class="subtab${t===_secTab?' active':''}" data-tab="${t}" onclick="secTab('${t}')">${{command:'🛡️ Command',connections:'🌐 Connections',threats:'🚨 Threats',audit:'🔍 Audit',web:'🌍 Web Traffic',guardian:'🐺 Guardian',ai:'🤖 AI Shield',dns:'🧿 DNS (Pi-hole)',system:'🔐 System &amp; LLM'}[t]}</div>`).join('')}
+      ${['command','redblue','connections','threats','audit','web','guardian','ai','dns','system'].map(t =>
+        `<div class="subtab${t===_secTab?' active':''}" data-tab="${t}" onclick="secTab('${t}')">${{command:'🛡️ Command',redblue:'🔴🔵 Red/Blue',connections:'🌐 Connections',threats:'🚨 Threats',audit:'🔍 Audit',web:'🌍 Web Traffic',guardian:'🐺 Guardian',ai:'🤖 AI Shield',dns:'🧿 DNS (Pi-hole)',system:'🔐 System &amp; LLM'}[t]}</div>`).join('')}
     </div>
     <div id="sec-body"><div class="empty">Loading…</div></div>`;
   secTab(_secTab);
@@ -41,7 +41,7 @@ function secTab(t) {
   _secTab = t;
   document.querySelectorAll('#sec-tabs .subtab').forEach(el =>
     el.classList.toggle('active', el.dataset.tab === t));
-  ({ command: secCommand, connections: secConnections, threats: secThreats, audit: secAudit, web: secWebTraffic, guardian: secGuardian, ai: secAIShield, dns: secDns, system: secSystem }[t] || secCommand)();
+  ({ command: secCommand, redblue: secRedBlue, connections: secConnections, threats: secThreats, audit: secAudit, web: secWebTraffic, guardian: secGuardian, ai: secAIShield, dns: secDns, system: secSystem }[t] || secCommand)();
 }
 window.secTab = secTab;
 

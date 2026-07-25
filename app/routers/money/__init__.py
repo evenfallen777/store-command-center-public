@@ -34,7 +34,7 @@ a function) and ``calendar`` reaches ``budget`` the same way, which keeps that
 pair free of an import cycle in both directions.
 """
 from ._base import router                              # shared router + one-time _ensure_schema()
-from . import signals, intel, missions, auto, bills, ledger, calendar, budget   # noqa: F401  (import registers their @router routes)
+from . import signals, intel, missions, auto, bills, ledger, calendar, budget, income_sources   # noqa: F401  (import registers their @router routes)
 
 # Re-exports so external callers keep resolving names against this module exactly
 # as they did against the old single-file module:

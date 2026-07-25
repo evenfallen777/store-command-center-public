@@ -66,6 +66,9 @@ DEFAULTS = {
     "world_ops_gate_post_printify":   "1",
     "world_ops_gate_cashapp_request":  "1",
     "world_ops_gate_cashapp_checkout": "1",
+    # social publishing (YouTube/TikTok via world_caps) — public + irreversible
+    # once live, so it defaults to always-ask; flippable like the other gates.
+    "world_ops_gate_social_publish":   "1",
 }
 
 # Kinds that CAN be always-gated, each with its own toggle + label (gates get a toggle).
@@ -76,6 +79,7 @@ GATEABLE = [
     ("post_printify", "👕 Printify listings"),
     ("cashapp_request",  "💵 Cash App payment-request links"),
     ("cashapp_checkout", "🟩 Cash App Pay checkout links"),
+    ("social_publish",   "📣 Social publishing (YouTube/TikTok)"),
 ]
 
 
@@ -274,9 +278,22 @@ def _endorse(conn, pid):
         mayor_ok, mayor_why = False, "the treasury can't bear it"
     elif morale < 30:
         mayor_ok, mayor_why = False, "the crew is exhausted — pause new ventures"
+    # DUALITY: when either lieutenant (✝️ Jesus / 😈 Satan) is on, the single
+    # taste number gains a best/worst/expected band on the endorse note — a
+    # hi-lo range instead of one optimistic point. Presentational only: the
+    # stored taste score, the endorsements and every gate are unchanged, and
+    # with both lieutenants off (the default) the note is exactly as before.
+    band_txt = ""
+    try:
+        import world_duality
+        bn = world_duality.band_note(world_duality.band(taste))
+        if bn:
+            band_txt = f" · ⚖️ {bn}"
+    except Exception:
+        pass
     conn.execute("UPDATE world_prayers SET taste=?, boss_ok=?, mayor_ok=?, endorse_note=? WHERE id=?",
                  (round(taste, 3), int(boss_ok), int(mayor_ok),
-                  f"💼 {boss_why} · 🏛️ {mayor_why}", pid))
+                  f"💼 {boss_why} · 🏛️ {mayor_why}{band_txt}", pid))
     conn.commit()
     return taste, boss_ok, mayor_ok
 

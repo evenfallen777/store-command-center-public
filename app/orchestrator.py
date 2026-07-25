@@ -9,8 +9,17 @@ Unload tools:
 Flow:
   LLM task  → wait for active images → free ComfyUI VRAM → run → unload LLM immediately after
   Image task → wait for active LLM  → unload LLM → run → release when done
+
+Unified queue (anti reload-thrash): every image/video job first registers a TICKET in
+the same queue the LLM worker drains (_media_gate) and waits until gpu_scheduler picks
+it. Affinity keeps picking queued tasks that borrow whatever is ACTUALLY resident
+(tracked as self._resident = (family, model) for llm/image/video alike), so e.g. all
+queued same-model LLM work runs on one load before an image job evicts the model —
+instead of reloading it between every interleaved job. Aging + a starvation cap in
+gpu_scheduler bound every wait; _QUEUE_WAIT is the hard force-proceed backstop.
 """
 import subprocess, threading, time, httpx, logging
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 log = logging.getLogger("orch")
@@ -37,6 +46,30 @@ try:
 except Exception:
     _QUEUE_WAIT = 1800
 
+# ── Video VRAM verification ───────────────────────────────────────────────────
+# After freeing ComfyUI + LM Studio for a video job, poll the node's nvidia-smi
+# until at least _VIDEO_MIN_FREE_MB MiB are free before launching, so a squatting
+# model fails the job with a CLEAR message (listing the offender) instead of an
+# OOM at the end of a 10-minute denoise. 0 disables the check.
+try:
+    _VIDEO_MIN_FREE_MB = int(_os.getenv("STORE_VIDEO_MIN_FREE_MB", "8000"))
+except Exception:
+    _VIDEO_MIN_FREE_MB = 8000
+try:
+    _VRAM_FREE_WAIT = int(_os.getenv("STORE_VIDEO_VRAM_WAIT", "120"))   # seconds
+except Exception:
+    _VRAM_FREE_WAIT = 120
+
+# A video-exclusive hold with no begin/end activity for this long is treated as
+# stale (its thread died without releasing — normally impossible: every hold is
+# finally-guarded) and stops blocking the LLM worker. Must exceed the longest
+# single segment (HunyuanVideo timeout is 5400 s); the timestamp refreshes at
+# every segment boundary, so per-chain length doesn't matter.
+try:
+    _HOLD_STALE = int(_os.getenv("STORE_GPU_HOLD_STALE", "7200"))
+except Exception:
+    _HOLD_STALE = 7200
+
 # SSH transport + LM Studio model-load/VRAM helpers live in orchestrator_node
 # (split out verbatim). Re-imported here so orchestrator's surface is unchanged;
 # the Orchestrator class below uses them exactly as before.
@@ -51,10 +84,31 @@ class Orchestrator:
     def __init__(self, llm_model: str = DEFAULT_MODEL):
         self.llm_model = llm_model
         self._current_llm_model = llm_model   # model _call_lmstudio should target right now
+        # What is ACTUALLY resident in VRAM right now, as a (family, model) pair —
+        # family 'llm' | 'image' | 'video', model may be None when unknown — or None
+        # when nothing is resident. This is the unified-resident notion the scheduler
+        # uses for affinity: it lets image/video work batch by type (and checkpoint)
+        # exactly like same-model LLM work, instead of only ever knowing the LLM.
+        self._resident = ("llm", llm_model)
         self._restore_model = None            # model we unloaded for image/video, to reload after
         self._lock = threading.RLock()
         self._img_prepare_lock = threading.Lock()  # serialise image_acquire calls
         self._last_llm_activity = time.time()  # for idle-TTL sweep (updated on any LLM use)
+
+        # ── Video-exclusive GPU hold ─────────────────────────────────────────
+        # > 0 ⇒ a video/3D/audio job (or a whole multi-segment chain) owns the
+        # GPU: the LLM worker must not START any task — and therefore can never
+        # trigger an LM Studio model load or JIT reload — until the hold drops
+        # to 0. A counter (not a bool) so each segment's video_acquire() nests
+        # inside a chain-long video_exclusive(). _video_hold_ts guards against
+        # a stale hold ever wedging the LLM queue (see _video_hold_active).
+        self._video_hold = 0
+        self._video_hold_ts = 0.0
+        # thread ident → nested hold count. Lets _media_gate() detect "this thread
+        # ALREADY owns the GPU via video_exclusive()" (a chain segment's nested
+        # video_acquire) and skip the queue gate — gating there would deadlock:
+        # the gate would wait for pending LLM tasks that the hold itself blocks.
+        self._video_hold_threads: dict[int, int] = {}
 
         # ── GPU states ────────────────────────────────────────────────────────
         self._llm_state = "idle"   # idle | loading | busy | unloading
@@ -138,6 +192,8 @@ class Orchestrator:
         if img == "loading":    return "⏳ Loading image model…"
         if img == "busy":       return f"🎨 Generating {active} image(s)…"
         if img == "unloading":  return "🔄 Freeing image VRAM…"
+        if self._video_hold_active():
+            return "🎬 Video job holds the GPU (chain in progress)"
         pending = sum(1 for t in queue if t["status"] == "pending")
         if pending and active:
             return f"⏸ LLM queued — waiting for {active} image job(s) to finish"
@@ -174,6 +230,19 @@ class Orchestrator:
                 model = model_registry.for_task(task) or None
             except Exception:
                 model = None
+            # NSFW mode → route Studio media prompt-gen (image/video/music/3D) to the
+            # uncensored nsfw_model (blank = auto-detected uncensored build, else the
+            # global LLM). Explicit per-task overrides above still win; unrelated LLM
+            # features (listings/pricing/security/assistant/research) are excluded.
+            if model is None and task in ("image_enhance", "audio_music", "audio_voice",
+                                          "audio_lyrics", "video_chain", "threed_enhance",
+                                          "studio_storyboard", "studio_scene_regen"):
+                try:
+                    import nsfw, model_registry
+                    if nsfw.enabled():
+                        model = model_registry.resolve("nsfw_model") or None
+                except Exception:
+                    pass
         with self._lock:
             tid = self._counter
             self._counter += 1
@@ -239,15 +308,54 @@ class Orchestrator:
             self._tasks.pop(old, None)
             self._order.remove(old)
 
+    # ─── Low-value background LLM chatter (borrow-only) ───────────────────────
+
+    def llm_borrow(self, work_fn):
+        """Run a low-value background LLM call (world-sim agent thoughts / security
+        reviews) ONLY by borrowing an already-resident LLM while the GPU is otherwise
+        idle. Returns work_fn()'s result, or None if it can't borrow — the caller then
+        falls back to canned text.
+
+        Why this exists: world_gov / world_security used to call _call_lmstudio()
+        directly, which made LM Studio JIT-load a model *outside* the unified queue.
+        That model then lingered on LM Studio's keep-alive TTL and starved image/video
+        generation of VRAM (the "someone's not following the queue" bug). Gating these
+        calls here means world chatter never loads or evicts anything — it only
+        piggybacks on a model the queue already has resident, and steps aside the moment
+        real GPU work is running or owns the VRAM."""
+        with self._lock:
+            gpu_busy = (self._img_state != "idle"
+                        or self._active_images > 0
+                        or bool(self._video_hold_threads)
+                        or self._llm_state in ("loading", "unloading"))
+            can_borrow = bool(self._resident) and self._resident[0] == "llm"
+        if gpu_busy or not can_borrow:
+            return None
+        try:
+            return work_fn()
+        except Exception:
+            return None
+
     # ─── Image task hooks ─────────────────────────────────────────────────────
 
-    def image_acquire(self):
+    def image_acquire(self, model: Optional[str] = None, priority: int = 1,
+                      desc: str = "Image generation"):
         """
         Call BEFORE submitting work to ComfyUI.
         Blocks until any active LLM task finishes, then unloads LLM from VRAM.
         Serialised so multiple concurrent generations don't race.
+
+        `model`/`priority`/`desc` (all optional, backward compatible) describe this
+        job to the unified queue: the job first waits its TURN via _media_gate — so
+        a resident LLM drains its queued same-model work before being evicted for
+        this image job, instead of reload-thrashing — and only then evicts.
         """
         self._pause_gate.wait()   # hold new image jobs while the queue is paused
+        if GPU_EXCLUSIVE:
+            # Only on an exclusive GPU does an image job EVICT the resident LLM —
+            # that's the only case where queue order matters for reload-thrash.
+            # On a big GPU (both fit) images proceed immediately, as before.
+            self._media_gate("image", model=model, priority=priority, desc=desc)
         with self._img_prepare_lock:
             # Wait for LLM to go idle
             waited = 0
@@ -288,6 +396,9 @@ class Orchestrator:
             with self._lock:
                 self._active_images += 1
                 self._img_state = "busy"
+                if GPU_EXCLUSIVE:
+                    self._resident = ("image", model)   # image family now owns the VRAM
+                # non-exclusive GPU: the LLM was NOT evicted — residency unchanged
 
     def image_release(self):
         """Call when a ComfyUI job finishes (success or failure)."""
@@ -335,23 +446,112 @@ class Orchestrator:
             with self._img_prepare_lock:
                 with self._lock:
                     busy = self._active_images > 0 or self._img_state != "idle"
-                if busy:
-                    log.info("[orch] skip LLM restore — a media job is using the GPU")
+                if busy or self._video_hold_active():
+                    log.info("[orch] skip LLM restore — a media job/video chain is using the GPU")
                     return
                 log.info("[orch] restoring previously-loaded model: %s", model)
-                _ssh(LMS, *_load_args(model), timeout=180)
+                rc, _ = _ssh(LMS, *_load_args(model), timeout=180)
+                if rc == 0:
+                    with self._lock:
+                        self._resident = ("llm", model)   # keep unified residency accurate
         threading.Thread(target=_do_restore, daemon=True, name="orch-restore").start()
 
-    def video_acquire(self):
+    # ─── Video-exclusive GPU hold ─────────────────────────────────────────────
+
+    def video_hold_begin(self):
+        """Mark the GPU as owned by video work. While the hold count is > 0 the
+        LLM worker will not start any task (so no `lms load` and no LM Studio
+        JIT reload can land mid-generation). Callers MUST pair with
+        video_hold_end() in a finally — or use video_exclusive()."""
+        ident = threading.get_ident()
+        with self._lock:
+            self._video_hold += 1
+            self._video_hold_ts = time.time()
+            self._video_hold_threads[ident] = self._video_hold_threads.get(ident, 0) + 1
+
+    def video_hold_end(self):
+        ident = threading.get_ident()
+        with self._lock:
+            self._video_hold = max(0, self._video_hold - 1)
+            self._video_hold_ts = time.time()
+            n = self._video_hold_threads.get(ident, 0) - 1
+            if n > 0:
+                self._video_hold_threads[ident] = n
+            else:
+                self._video_hold_threads.pop(ident, None)
+        self._work_event.set()   # wake the worker — queued LLM tasks may proceed
+
+    def _thread_holds_video(self) -> bool:
+        """True when the CALLING thread already owns a video-exclusive hold (it is
+        inside video_exclusive(), e.g. a chain between segments)."""
+        with self._lock:
+            return self._video_hold_threads.get(threading.get_ident(), 0) > 0
+
+    def _video_hold_active(self) -> bool:
+        """True while video work owns the GPU. A hold whose thread died without
+        releasing (should be impossible — every hold is finally-guarded) goes
+        stale after _HOLD_STALE seconds of no begin/end activity and stops
+        blocking, so the LLM queue can never be wedged forever."""
+        with self._lock:
+            n, ts = self._video_hold, self._video_hold_ts
+        if n <= 0:
+            return False
+        if time.time() - ts > _HOLD_STALE:
+            log.warning("[orch] video-exclusive hold looks stale (%d holder(s), "
+                        "untouched %ds > %ds) — ignoring it", n, int(time.time() - ts), _HOLD_STALE)
+            return False
+        return True
+
+    @contextmanager
+    def video_exclusive(self, model: Optional[str] = None, priority: int = 1,
+                        desc: str = "Video chain"):
+        """Hold GPU exclusivity across a WHOLE multi-segment video chain, not just
+        one segment. Between segments _active_images drops to 0, which used to let
+        the LLM worker load an 8 GB model that then OOMed the next segment; this
+        span-hold closes that gap. Nested video_acquire/release still work (the
+        hold is a counter). `model`/`priority`/`desc` describe the chain to the
+        unified queue: the gate runs BEFORE the hold is taken (gating after would
+        deadlock — the hold blocks the very LLM tasks the gate waits on), so a
+        resident LLM drains its queued same-model work before the chain evicts it."""
+        self._media_gate("video", model=model, priority=priority, desc=desc)
+        self.video_hold_begin()
+        try:
+            yield
+        finally:
+            self.video_hold_end()
+
+    def video_acquire(self, model: Optional[str] = None, priority: int = 1,
+                      desc: str = "Video generation"):
         """
         Call BEFORE submitting work to Wan2.1 / any video gen pipeline.
-        Like image_acquire(), but ALSO frees ComfyUI VRAM first.
+        Like image_acquire(), but ALSO frees ComfyUI VRAM first, and then
+        VERIFIES via nvidia-smi that the VRAM is actually free.
 
         Why needed: Wan2.1's T5-XXL text encoder needs ~9.5 GB VRAM even with
         CPU offloading.  If ComfyUI has SDXL cached (~6.7 GB) + T5 = 16+ GB > 12 GB.
         We must free ComfyUI *and* LM Studio before any video generation starts.
+
+        Raises RuntimeError when the node can't free enough VRAM (message lists
+        the offending process) — fail the job clearly instead of launching into
+        a guaranteed OOM. On raise, no state is leaked: do NOT call
+        video_release() for a failed acquire.
+
+        `model`/`priority`/`desc` (optional, backward compatible) describe this job
+        to the unified queue. The _media_gate turn-wait runs BEFORE video_hold_begin:
+        while waiting, the LLM worker must stay free to drain the resident model's
+        queued work (gating inside the hold would deadlock). A nested acquire from a
+        thread already inside video_exclusive() skips the gate — it owns the GPU.
         """
         self._pause_gate.wait()   # hold new video jobs while the queue is paused
+        self._media_gate("video", model=model, priority=priority, desc=desc)
+        self.video_hold_begin()   # from here on, the LLM worker starts nothing
+        try:
+            self._video_acquire_locked(model)
+        except BaseException:
+            self.video_hold_end()   # failed acquire must not leak the hold
+            raise
+
+    def _video_acquire_locked(self, model: Optional[str] = None):
         with self._img_prepare_lock:
             # Wait for LLM to go idle
             waited = 0
@@ -391,13 +591,101 @@ class Orchestrator:
             self._set(img="idle")
             self._free_llm_for_media(force=True)
 
+            # VERIFY the VRAM is actually free before claiming the GPU. Unloads
+            # are asynchronous on the node and LM Studio JIT-reloads a model for
+            # any still-pending /chat/completions request \u2014 "we asked" is not
+            # "it's free". Raises RuntimeError (offender listed) on failure.
+            self._verify_vram_free()
+
             with self._lock:
                 self._active_images += 1
                 self._img_state = "busy"
+                self._resident = ("video", model)   # video family now owns the VRAM
 
     def video_release(self):
         """Call when a video generation job finishes (success or failure)."""
         self.image_release()   # same release mechanism
+        self.video_hold_end()  # pairs with video_acquire's video_hold_begin
+
+    # ─── Unified-queue gate for media jobs ────────────────────────────────────
+
+    def _media_gate(self, kind: str, model: Optional[str], priority: int, desc: str):
+        """Register this image/video job as a TICKET in the unified queue and wait
+        until the scheduler picks it. This is what stops reload-thrash: while a
+        resident LLM still has queued same-model work, the scheduler keeps picking
+        those LLM tasks (affinity), and this media job waits its turn instead of
+        evicting the model between them. Anti-starvation (aging + starve-cap in
+        gpu_scheduler) guarantees the wait is bounded even under a continuous
+        stream of LLM work; _QUEUE_WAIT is the hard force-proceed backstop.
+
+        The ticket is ONLY a queue position: cancelling it (queue clear) does not
+        cancel the media job — the job just stops waiting and proceeds, exactly as
+        media jobs behaved before the gate existed. Never called with the video
+        hold owned by this thread (that would wait on LLM tasks the hold blocks)."""
+        if self._thread_holds_video():
+            return   # nested acquire inside video_exclusive() — GPU already ours
+        with self._lock:
+            tid = self._counter
+            self._counter += 1
+            self._tasks[tid] = {
+                "id":          tid,
+                "type":        kind,            # 'image' | 'video'
+                "media_ticket": True,           # queue position only — worker never runs it
+                "func":        None,
+                "desc":        desc,
+                "status":      "pending",
+                "result":      None,
+                "error":       None,
+                "retry_meta":  None,
+                "model":       model,           # checkpoint / model_id when known
+                "task":        None,
+                "source":      None,
+                "priority":    int(priority),
+                "enqueued_at": time.time(),
+                "event":       threading.Event(),
+            }
+            self._order.append(tid)
+            self._prune()
+        try:
+            self._await_turn(tid)
+        finally:
+            # retire the ticket no matter how the wait ended — it must never linger
+            with self._lock:
+                t = self._tasks.get(tid)
+                if t and t["status"] in ("pending", "running"):
+                    t["status"] = "done"
+                    t["event"].set()
+            self._work_event.set()   # let the worker re-evaluate the queue
+
+    def _await_turn(self, tid: int):
+        """Poll until the unified scheduler says this ticket is next (or it was
+        cancelled, or the _QUEUE_WAIT backstop expires — then proceed anyway).
+        Checks BEFORE sleeping, so an empty queue adds no latency. Each losing
+        iteration wakes the worker so the actual winner (an LLM task) runs."""
+        deadline = time.time() + _QUEUE_WAIT
+        logged = False
+        while True:
+            if not self._pause_gate.is_set():
+                t0 = time.time()
+                self._pause_gate.wait()
+                deadline += time.time() - t0   # pause time doesn't consume the budget
+            with self._lock:
+                t = self._tasks.get(tid)
+                if not t or t["status"] != "pending":
+                    return   # cancelled/cleared — proceed; queue controls never block media
+                winner = self._pick_pending()
+            if winner is not None and winner["id"] == tid:
+                return       # our turn — caller proceeds to evict + claim the GPU
+            if time.time() >= deadline:
+                log.warning("[orch] media job '%s' waited %ds for its queue turn — proceeding anyway",
+                            t.get("desc"), _QUEUE_WAIT)
+                return
+            if not logged:
+                log.info("[orch] %s job '%s' queued — letting resident-model work drain first…",
+                         t.get("type"), t.get("desc"))
+                logged = True
+            self._work_event.set()   # the winner is an LLM task — make sure the worker runs it
+            time.sleep(1)
 
     # ─── Worker loop ──────────────────────────────────────────────────────────
 
@@ -415,43 +703,86 @@ class Orchestrator:
                 task = self._pick_pending()
             if not task:
                 break
+            if task.get("type") != "llm":
+                # The unified scheduler says a MEDIA job is next. Its own thread is
+                # waiting in _await_turn and will see the same verdict within a
+                # second, evict the LLM and claim the GPU; image_release /
+                # video_hold_end will wake this worker afterwards. (If the verdict
+                # flips to an LLM task by aging first, that waiting thread pokes
+                # _work_event every poll, so we re-run and pick it up.)
+                break
             self._run_llm_task(task)
 
     def _pick_pending(self):
-        """Choose the next pending LLM task (called under self._lock). Uses the unified
-        scheduler (priority → model-affinity batching → anti-starvation aging); falls back
-        to FIFO on ANY issue so a scheduler bug can never wedge the worker."""
+        """Choose the next pending job — LLM task OR media ticket — from the unified
+        queue (called under self._lock). Uses the unified scheduler (priority →
+        model/type-affinity batching → anti-starvation aging + starve cap); falls back
+        to FIFO across the whole queue on ANY issue so a scheduler bug can never wedge
+        the worker OR a gated media job. Callers: _drain runs the pick only when it is
+        an LLM task; _await_turn compares the pick against its own ticket."""
         pending = [tid for tid in self._order
                    if (t := self._tasks.get(tid)) and t["status"] == "pending"]
         if not pending:
             return None
         try:
             import gpu_scheduler as _sched
-            jobs = [_sched.Job(
-                        id=tid,
-                        kind="llm",
-                        model=self._tasks[tid].get("model"),
-                        priority=int(self._tasks[tid].get("priority", 1)),
-                        enqueued_at=float(self._tasks[tid].get("enqueued_at", 0.0)))
-                    for tid in pending]
-            nxt = _sched.pick_next(jobs, resident_model=self._current_llm_model, now=time.time())
+            now = time.time()
+            jobs = []
+            for tid in pending:
+                t = self._tasks[tid]
+                kind = t.get("type") or "llm"
+                enq = float(t.get("enqueued_at", 0.0))
+                if t.get("media_ticket") and now - enq > _QUEUE_WAIT + 300:
+                    # Orphaned ticket: its thread force-proceeds at _QUEUE_WAIT, so a
+                    # pending ticket this old has no living waiter. Retire it so it
+                    # can never sit at the head of the queue and wedge the pick.
+                    log.warning("[orch] retiring orphaned %s ticket %d ('%s')",
+                                kind, tid, t.get("desc"))
+                    t["status"] = "cancelled"
+                    t["event"].set()
+                    continue
+                jobs.append(_sched.Job(
+                    id=tid, kind=kind, model=t.get("model"),
+                    priority=int(t.get("priority", 1)), enqueued_at=enq))
+            # unified resident (family, model); legacy fallback: the tracked LLM model
+            resident = getattr(self, "_resident", None)
+            if resident is None and self._current_llm_model:
+                resident = ("llm", self._current_llm_model)
+            nxt = _sched.pick_next(jobs, resident_model=resident, now=now)
             if nxt is not None:
                 return self._tasks[nxt.id]
+            if not jobs:
+                return None   # every pending entry was an orphaned ticket
         except Exception as e:
             log.warning("[orch] scheduler pick failed — FIFO fallback: %s", e)
-        return self._tasks[pending[0]]   # FIFO fallback (current-loaded behavior)
+        return self._tasks[pending[0]]   # FIFO fallback (insertion order, all types)
 
     def _run_llm_task(self, task: dict):
+        gate_held = False
         try:
-            # ── Step 1: wait for image gen(s) to finish ───────────────────────
+            # ── Step 1: wait for media jobs AND any video-exclusive hold to end,
+            # then CLAIM the GPU under the same prepare-lock every media
+            # *_acquire() uses. The old gate only checked _active_images at one
+            # instant: between two segments of a video chain it reads 0, so the
+            # worker would start a task whose LM Studio call JIT-loaded an 8 GB
+            # model straight into the running chain (the seg-1 OOM). Now the
+            # chain's video_exclusive() hold spans the gap, and the claim is
+            # re-checked under the lock so acquire/load can never interleave. ──
             waited = 0
             while True:
                 with self._lock:
                     active = self._active_images
-                if active == 0:
-                    break
+                if active == 0 and not self._video_hold_active():
+                    self._img_prepare_lock.acquire()
+                    with self._lock:
+                        active = self._active_images
+                    if active == 0 and not self._video_hold_active():
+                        gate_held = True
+                        break
+                    # A media job started while we were claiming — back off.
+                    self._img_prepare_lock.release()
                 if waited == 0:
-                    log.info("[orch] LLM task queued — waiting for %d image job(s)…", active)
+                    log.info("[orch] LLM task queued — waiting for media/video job(s) to release the GPU…")
                 time.sleep(2)
                 waited += 2
 
@@ -485,8 +816,16 @@ class Orchestrator:
                         f"LM Studio could not load required model '{required}' "
                         f"(loaded={_loaded_llms()})")
             else:
-                self._current_llm_model = self._pick_llm_model()
+                borrowed = self._pick_llm_model()
+                with self._lock:
+                    self._current_llm_model = borrowed
+                    self._resident = ("llm", borrowed)
             self._set(llm="busy")
+            # Model is resident — release the claim before the (possibly long)
+            # inference so media acquires can start their waits; they still wait
+            # for llm busy→idle exactly as before.
+            self._img_prepare_lock.release()
+            gate_held = False
             result = task["func"]()
 
             with self._lock:
@@ -501,6 +840,8 @@ class Orchestrator:
                 task["status"] = "error"
             self._record_history(task, "error")
         finally:
+            if gate_held:
+                self._img_prepare_lock.release()
             task["event"].set()
             self.mark_activity()
             # ── Step 4: keep the LLM loaded for reuse (no thrash). It is only
@@ -512,6 +853,8 @@ class Orchestrator:
         table — the SINGLE write path for the persistent queue history. A logging
         failure must NEVER break the job itself, so everything is swallowed here
         (and record() swallows its own errors too — belt and suspenders)."""
+        if task.get("media_ticket"):
+            return   # queue-position tickets aren't jobs — media persists its own lifecycle
         try:
             import queue_history
             queue_history.record(
@@ -574,6 +917,10 @@ class Orchestrator:
                 swept.append(m)
                 log.info("[orch] idle-sweep unloaded %s (idle %ds ≥ ttl %ds)",
                          m, int(idle_for), m_ttl)
+        if swept:
+            with self._lock:
+                if self._resident and self._resident[0] == "llm":
+                    self._resident = None
         return {"swept": swept}
 
     def _ensure_loaded(self, model: str) -> bool:
@@ -594,7 +941,9 @@ class Orchestrator:
                        for m in loaded), loaded
         ok, loaded = _match()
         if ok:
-            self._current_llm_model = model
+            with self._lock:
+                self._current_llm_model = model
+                self._resident = ("llm", model)
             return True
         # `lms load` is SYNCHRONOUS (blocks until the model is ready). MULTI-MODEL
         # eviction policy: CPU-placed instances (`@cpu` / gpu:"off") and PINNED
@@ -615,7 +964,9 @@ class Orchestrator:
             time.sleep(3)                      # let it settle past any 'loading' state
             ok, now = _match()
             if ok:
-                self._current_llm_model = model
+                with self._lock:
+                    self._current_llm_model = model
+                    self._resident = ("llm", model)
                 log.info("[orch] ensure_loaded: '%s' resident", model)
                 return True
             log.warning("[orch] ensure_loaded: '%s' not resident after load (saw %s)", model, now)
@@ -642,6 +993,63 @@ class Orchestrator:
             if img is not None:
                 self._img_state = img
 
+    def _gpu_free_mb(self):
+        """Free VRAM on the node's GPU in MiB, or None if the query failed."""
+        rc, out = _ssh("nvidia-smi", "--query-gpu=memory.free",
+                       "--format=csv,noheader,nounits", timeout=15)
+        if rc != 0 or not out:
+            return None
+        try:
+            return int(out.strip().splitlines()[0].strip())
+        except Exception:
+            return None
+
+    def _gpu_vram_holders(self) -> str:
+        """'pid name used_memory' lines for every compute process on the GPU —
+        the OOM post-mortem, gathered BEFORE the OOM."""
+        rc, out = _ssh("nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                       "--format=csv,noheader", timeout=15)
+        return out.strip() if rc == 0 and out.strip() else "unknown (nvidia-smi query failed)"
+
+    def _verify_vram_free(self):
+        """Poll the node's free VRAM until ≥ _VIDEO_MIN_FREE_MB MiB or timeout.
+        Halfway through, retry the unloads once (LM Studio JIT-reloads a model
+        for an in-flight request; a straggler ComfyUI free can lag). On timeout,
+        raise RuntimeError naming the process(es) holding VRAM so the job fails
+        with an actionable message instead of OOMing at the end of a denoise.
+        A failed nvidia-smi QUERY (transient SSH hiccup) does NOT fail the job —
+        preflight already proved the node reachable; we just proceed as before."""
+        if _VIDEO_MIN_FREE_MB <= 0:
+            return
+        deadline = time.time() + max(10, _VRAM_FREE_WAIT)
+        refreed = False
+        last = None
+        while True:
+            free = self._gpu_free_mb()
+            if free is None:
+                log.warning("[orch] video_acquire: could not query free VRAM — proceeding unverified")
+                return
+            last = free
+            if free >= _VIDEO_MIN_FREE_MB:
+                log.info("[orch] video_acquire: VRAM verified free (%d MiB ≥ %d MiB)",
+                         free, _VIDEO_MIN_FREE_MB)
+                return
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            if not refreed and remaining < max(10, _VRAM_FREE_WAIT) / 2:
+                log.warning("[orch] video_acquire: only %d MiB free — retrying ComfyUI/LLM unload", free)
+                self._free_comfyui()
+                self._unload_llm()
+                refreed = True
+            time.sleep(3)
+        holders = self._gpu_vram_holders()
+        raise RuntimeError(
+            f"GPU not free for video generation: only {last} MiB VRAM free after "
+            f"{_VRAM_FREE_WAIT}s (need ≥ {_VIDEO_MIN_FREE_MB} MiB; override via "
+            f"STORE_VIDEO_MIN_FREE_MB). Processes holding VRAM (pid, name, used): "
+            f"{holders}. Free the GPU and retry.")
+
     def _free_comfyui(self):
         """POST /free to ComfyUI — unloads model weights, keeps process alive."""
         try:
@@ -654,6 +1062,9 @@ class Orchestrator:
             log.info("[orch] ComfyUI /free → %s", r.status_code)
         except Exception as e:
             log.info("[orch] ComfyUI /free skipped: %s", e)
+        with self._lock:
+            if self._resident and self._resident[0] in ("image", "video"):
+                self._resident = None   # image/video family no longer owns the VRAM
 
     @staticmethod
     def _is_cpu_placed(model: str) -> bool:
@@ -707,6 +1118,9 @@ class Orchestrator:
             log.warning("[orch] LLM(s) still resident after unload: %s — retrying", still)
             for model in still:
                 _ssh(LMS, "unload", model, timeout=20)
+        with self._lock:
+            if self._resident and self._resident[0] == "llm":
+                self._resident = None   # the LLM family no longer owns the VRAM
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

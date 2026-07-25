@@ -34,4 +34,9 @@ VSITE="$(ls -d "$HOME"/TripoSG/venv/lib/python*/site-packages 2>/dev/null | head
 grep -viE '^(torch|torchvision|numpy|diso)([=<>! ]|$)' requirements.txt > /tmp/triposg_reqs.txt
 ~/TripoSG/venv/bin/pip install -q -r /tmp/triposg_reqs.txt
 python3 -c "print('deps installed')"
+# Completion marker for node-setup.sh's gate: written only after the payload
+# install above succeeds (set -euo pipefail means a failed pip install exits
+# before this line runs). node-setup.sh must NOT gate on venv/bin/python3
+# existing alone — that binary appears before the payload installs.
+touch ~/TripoSG/.install_complete
 echo TRIPOSG_INSTALL_DONE

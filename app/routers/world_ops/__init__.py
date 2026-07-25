@@ -16,6 +16,6 @@ from ._base import router, _designs_url, _exec_paypal_payout   # shared router +
 # resolving ``routers.world_ops._designs_url`` / ``._exec_paypal_payout`` exactly as
 # they did against the old single-file module (tests/test_board_url.py and
 # tests/test_money_gates.py depend on them).
-from . import budget, prayers, community, control, republic  # noqa: F401  (import registers @router routes)
+from . import budget, prayers, community, control, republic, caps, jesus, satan  # noqa: F401  (import registers @router routes)
 
 __all__ = ["router", "_designs_url", "_exec_paypal_payout"]

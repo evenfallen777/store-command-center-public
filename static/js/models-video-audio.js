@@ -61,6 +61,7 @@ function _videoModelsHTML(videoModels) {
               : `<button class="btn-sm primary" data-action="dl-video-model" data-key="${esc(vm.key)}" id="vdl-btn-${safeVid}" title="Download this text-to-video model to the GPU box (several GB, one time). Needed before it can be selected in Video generation.">&#11015; Download</button>`}
         </div>
       </div>
+      ${_videoTuneHTML(vm, safeVid)}
       <div class="dl-progress" id="vdl-prog-${safeVid}" style="display:${dlSt==='downloading'?'block':'none'};margin-top:10px;">
         <div style="font-size:.75rem;color:var(--muted);margin-bottom:5px;" id="vdl-status-${safeVid}">Downloading&hellip;</div>
         <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden;">
@@ -76,6 +77,75 @@ function _videoModelsHTML(videoModels) {
   h += `</div>`;
   return h;
 }
+
+// ── Per-model video-gen tuning (⚙ Tune defaults) ──────────────────────────────
+// Collapsible editor for a video model's generation defaults (width/height/
+// frames/steps/fps/guidance/strength). Placeholders show the stock catalog
+// value; a filled field becomes the owner's override (stored server-side in
+// the video_model_settings setting). Blank everything = stock behavior.
+const _VIDEO_TUNE_FIELDS = [
+  ['width', 'Width'], ['height', 'Height'], ['num_frames', 'Frames'],
+  ['steps', 'Steps'], ['fps', 'FPS'], ['guidance', 'Guidance (CFG)'],
+  ['strength', 'Chain strength'],
+];
+
+function _videoTuneHTML(vm, safe) {
+  const d = vm.gen_defaults || {};
+  const o = vm.gen_overrides || {};
+  if (!Object.keys(d).length) return '';
+  const tuned = Object.keys(o).length;
+  const inputs = _VIDEO_TUNE_FIELDS.filter(([k]) => d[k] !== undefined).map(([k, label]) => `
+    <label style="font-size:.7rem;color:var(--muted);display:block;">${label}
+      <input type="number" step="any" data-vk="${k}" value="${o[k] !== undefined ? o[k] : ''}"
+        placeholder="${d[k]}" title="Stock default: ${d[k]} — leave blank to use it"
+        style="width:100%;margin-top:2px;padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:5px;box-sizing:border-box;font-size:.78rem;">
+    </label>`).join('');
+  return `
+    <div style="margin-top:8px;">
+      <button class="btn-sm" onclick="toggleVideoTune('${safe}')" style="font-size:.72rem;"
+        title="Per-model generation defaults: what this model uses when you don't pick values explicitly (and the guidance/CFG it renders with). Blank fields keep the stock value shown in grey.">
+        &#9881; Tune defaults${tuned ? ` <span style="color:var(--accent);">· ${tuned} set</span>` : ''}</button>
+      <div id="vmtune-${safe}" style="display:none;margin-top:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;">${inputs}</div>
+        <div style="font-size:.68rem;color:var(--muted);margin-top:6px;">Used when the Videos/Chain forms don't override them; guidance always renders with this value. Blank = stock default.</div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="btn-sm primary" onclick="saveVideoTune('${esc(vm.key)}','${safe}')" style="font-size:.72rem;">&#128190; Save</button>
+          <button class="btn-sm" onclick="resetVideoTune('${esc(vm.key)}','${safe}')" style="font-size:.72rem;">&#8634; Reset to stock</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function toggleVideoTune(safe) {
+  const el = document.getElementById('vmtune-' + safe);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+window.toggleVideoTune = toggleVideoTune;
+
+async function saveVideoTune(key, safe) {
+  const body = {};
+  document.querySelectorAll(`#vmtune-${safe} input[data-vk]`).forEach(inp => {
+    if (inp.value.trim() !== '') body[inp.dataset.vk] = parseFloat(inp.value);
+  });
+  try {
+    const r = await api(`/api/video-models/${encodeURIComponent(key)}/gen-settings`,
+                        { method: 'PUT', body: JSON.stringify(body) });
+    const n = Object.keys(r.overrides || {}).length;
+    toast(n ? `Saved — ${n} setting${n > 1 ? 's' : ''} tuned for this model`
+            : 'Saved — model back on stock defaults');
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+window.saveVideoTune = saveVideoTune;
+
+async function resetVideoTune(key, safe) {
+  try {
+    await api(`/api/video-models/${encodeURIComponent(key)}/gen-settings`, { method: 'DELETE' });
+    document.querySelectorAll(`#vmtune-${safe} input[data-vk]`).forEach(inp => { inp.value = ''; });
+    toast('Reset to stock defaults');
+  } catch (e) { toast('Reset failed: ' + e.message, 'error'); }
+}
+window.resetVideoTune = resetVideoTune;
+
 
 function _audioModelsHTML(audioModels) {
   audioModels = audioModels || [];

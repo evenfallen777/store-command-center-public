@@ -1,22 +1,33 @@
 /* ══ SOCIAL TAB ══
    Draft & schedule posts for Instagram / TikTok / YouTube / Facebook.
    Phase 1: compose (LLM-assisted) → attach your generated media → queue/schedule →
-   "copy caption, open the app, mark posted". Phase 2 will add real auto-posting
-   per platform (endpoints/schema already shaped for it). */
+   "copy caption, open the app, mark posted".
+   Phase 2 (YouTube + TikTok + Instagram/Facebook live): Connect via OAuth popup
+   then "Publish" on any video post — uploads in the background, status chip
+   polls /api/social/posts/{id}/publications until live/failed. TikTok posts are
+   SELF_ONLY (private to you) until the app passes TikTok's audit. One Meta
+   connect covers Instagram Reels AND the linked Facebook Page — those posts go
+   PUBLIC immediately (Meta's API has no privacy knob). */
 
 let _soPlatforms = [];
 let _soPosts = [];
 let _soMedia = [];
-let _soSel = null;          // {media_type, media_path, media_url, title}
+let _soSel = null;          // {media_type, media_path, media_url, title, video_id?, chain_id?}
+let _soMediaFilter = 'all'; // media picker filter: all | video | image
 let _soEditId = null;
 let _soFilter = 'all';
+let _soYt = { has_client: false, connected: false, privacy: 'private' };
+let _soTk = { has_client: false, connected: false, privacy: 'SELF_ONLY', audited: false };
+let _soIg = { has_client: false, connected: false, fb_connected: false, ig_username: '' };
+let _soPubs = {};           // post_id -> [publication rows]
+let _soPubTimer = null;     // active publish-poll timer
 
 async function renderSocial() {
   document.getElementById('main-content').innerHTML = `
     <div class="view-header">
       <div class="view-title">&#128241; Social</div>
       <div class="view-sub">Draft, caption &amp; schedule posts for Instagram, TikTok, YouTube &amp; Facebook.
-        Attach your generated media, then copy &amp; post. <b>Auto-posting is coming</b> &mdash; this queues drafts today.</div>
+        Attach your generated media, write a caption, then <b>Publish directly</b> to your connected platforms (YouTube &amp; TikTok) &mdash; or copy &amp; post to the rest.</div>
     </div>
     <div id="social-conn" style="margin-bottom:14px;"></div>
     <div id="social-compose" style="margin-bottom:18px;"></div>
@@ -31,6 +42,64 @@ window.renderSocial = renderSocial;
 async function loadSoPlatforms() {
   try { const d = await api('/api/social/platforms'); _soPlatforms = d.platforms || []; }
   catch { _soPlatforms = []; }
+  try { _soYt = await api('/api/social/youtube/status'); }
+  catch { _soYt = { has_client: false, connected: false, privacy: 'private' }; }
+  try { _soTk = await api('/api/social/tiktok/status'); }
+  catch { _soTk = { has_client: false, connected: false, privacy: 'SELF_ONLY', audited: false }; }
+  try { _soIg = await api('/api/social/instagram/status'); }
+  catch { _soIg = { has_client: false, connected: false, fb_connected: false, ig_username: '' }; }
+}
+
+/* ── YouTube / TikTok / Meta OAuth (popup) ────────────────────────────────── */
+window.addEventListener('message', async (e) => {
+  if (e.data === 'youtube_connected' || e.data === 'tiktok_connected' || e.data === 'instagram_connected') {
+    toast(e.data === 'youtube_connected' ? '✅ YouTube connected'
+        : e.data === 'tiktok_connected' ? '✅ TikTok connected' : '✅ Meta (Instagram/Facebook) connected');
+    await loadSoPlatforms();
+    if (document.getElementById('social-conn')) { renderSoConnections(); await loadSoQueue(); }
+  }
+});
+async function soConnectYouTube() {
+  try {
+    const { url } = await api('/api/social/youtube/connect');
+    window.open(url, 'yt_oauth', 'width=620,height=760,noopener=no');
+  } catch (e) { toast('Connect failed: ' + e.message, 'error'); }
+}
+async function soDisconnectYouTube() {
+  if (!confirm('Disconnect YouTube? Stored tokens are deleted (uploads already live stay live).')) return;
+  try {
+    await api('/api/social/youtube/disconnect', { method: 'DELETE' });
+    toast('YouTube disconnected');
+    await loadSoPlatforms(); renderSoConnections(); await loadSoQueue();
+  } catch (e) { toast('Disconnect failed: ' + e.message, 'error'); }
+}
+async function soConnectTikTok() {
+  try {
+    const { url } = await api('/api/social/tiktok/connect');
+    window.open(url, 'tk_oauth', 'width=620,height=760,noopener=no');
+  } catch (e) { toast('Connect failed: ' + e.message, 'error'); }
+}
+async function soDisconnectTikTok() {
+  if (!confirm('Disconnect TikTok? Stored tokens are deleted (posts already live stay live).')) return;
+  try {
+    await api('/api/social/tiktok/disconnect', { method: 'DELETE' });
+    toast('TikTok disconnected');
+    await loadSoPlatforms(); renderSoConnections(); await loadSoQueue();
+  } catch (e) { toast('Disconnect failed: ' + e.message, 'error'); }
+}
+async function soConnectInstagram() {
+  try {
+    const { url } = await api('/api/social/instagram/connect');
+    window.open(url, 'meta_oauth', 'width=620,height=760,noopener=no');
+  } catch (e) { toast('Connect failed: ' + e.message, 'error'); }
+}
+async function soDisconnectInstagram() {
+  if (!confirm('Disconnect Meta (Instagram + Facebook Page)? Stored tokens are deleted (posts already live stay live).')) return;
+  try {
+    await api('/api/social/instagram/disconnect', { method: 'DELETE' });
+    toast('Meta disconnected');
+    await loadSoPlatforms(); renderSoConnections(); await loadSoQueue();
+  } catch (e) { toast('Disconnect failed: ' + e.message, 'error'); }
 }
 function _plat(key) { return _soPlatforms.find(p => p.key === key) || { key, name: key, icon: '', upload_url: '#' }; }
 
@@ -55,7 +124,38 @@ function renderSoConnections() {
             <div style="font-size:.64rem;color:var(--muted);margin-bottom:8px;line-height:1.5;">
               <span style="color:var(--warn);">&#9881;&#65039; auto-post: ${esc(p.auto)}</span><br>${esc(p.api)}
             </div>
-            <button class="btn-sm" onclick="soSaveHandle('${p.key}')">&#128190; Save</button>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="btn-sm" onclick="soSaveHandle('${p.key}')">&#128190; Save</button>
+              ${p.key === 'youtube' ? (
+                _soYt.connected
+                  ? `<span style="font-size:.7rem;color:#22c55e;align-self:center;" title="OAuth tokens stored — Publish to YouTube is available on video posts. New uploads default to '${esc(_soYt.privacy)}' privacy (setting social_youtube_privacy).">&#9679; Connected</span>
+                     <button class="btn-sm" onclick="soDisconnectYouTube()" title="Delete the stored YouTube OAuth tokens.">Disconnect</button>`
+                  : (_soYt.has_client
+                      ? `<button class="btn-sm primary" onclick="soConnectYouTube()" title="Open Google's consent screen in a popup and authorize video uploads to your channel.">&#128279; Connect YouTube</button>`
+                      : `<span style="font-size:.66rem;color:var(--muted);align-self:center;">Set <b>yt_client_id</b> + <b>yt_client_secret</b> in Settings to enable Connect</span>`)
+              ) : ''}
+              ${p.key === 'tiktok' ? (
+                _soTk.connected
+                  ? `<span style="font-size:.7rem;color:#22c55e;align-self:center;" title="OAuth tokens stored — Publish to TikTok is available on video posts. Posts upload as '${esc(_soTk.privacy)}'${_soTk.audited ? " (setting social_tiktok_privacy)" : " — private to you until the app passes TikTok's audit (then set tiktok_audited=1)"}.">&#9679; Connected</span>
+                     <button class="btn-sm" onclick="soDisconnectTikTok()" title="Delete the stored TikTok OAuth tokens.">Disconnect</button>`
+                  : (_soTk.has_client
+                      ? `<button class="btn-sm primary" onclick="soConnectTikTok()" title="Open TikTok's consent screen in a popup and authorize video posting to your account.">&#128279; Connect TikTok</button>`
+                      : `<span style="font-size:.66rem;color:var(--muted);align-self:center;">Set <b>tiktok_client_key</b> + <b>tiktok_client_secret</b> in Settings to enable Connect</span>`)
+              ) : ''}
+              ${p.key === 'instagram' ? (
+                _soIg.connected
+                  ? `<span style="font-size:.7rem;color:#22c55e;align-self:center;" title="Meta token stored${_soIg.ig_username ? ' for @' + esc(_soIg.ig_username) : ''} — Publish to Instagram is available on video posts. Reels published via the API are PUBLIC immediately.">&#9679; Connected${_soIg.ig_username ? ' @' + esc(_soIg.ig_username) : ''}</span>
+                     <button class="btn-sm" onclick="soDisconnectInstagram()" title="Delete the stored Meta OAuth tokens (also disconnects the Facebook Page).">Disconnect</button>`
+                  : (_soIg.has_client
+                      ? `<button class="btn-sm primary" onclick="soConnectInstagram()" title="Open Meta's consent screen in a popup and authorize publishing to your IG Business account + linked Facebook Page (one connect covers both).">&#128279; Connect Instagram</button>`
+                      : `<span style="font-size:.66rem;color:var(--muted);align-self:center;">Set <b>meta_app_id</b> + <b>meta_app_secret</b> in Settings to enable Connect (or paste <b>meta_access_token</b> + <b>ig_business_id</b> directly)</span>`)
+              ) : ''}
+              ${p.key === 'facebook' ? (
+                _soIg.fb_connected
+                  ? `<span style="font-size:.7rem;color:#22c55e;align-self:center;" title="Page token stored — Publish to your Facebook Page is available on video posts. Page videos published via the API are PUBLIC immediately.">&#9679; Connected (via Meta)</span>`
+                  : `<span style="font-size:.66rem;color:var(--muted);align-self:center;">Connects together with Instagram (one Meta login covers both)</span>`
+              ) : ''}
+            </div>
           </div>`).join('')}
       </div>
     </details>`;
@@ -141,18 +241,42 @@ async function soToggleMediaPicker() {
   box.innerHTML = '<div class="loading-state">Loading media…</div>';
   if (!_soMedia.length) { try { const d = await api('/api/social/media'); _soMedia = d.media || []; } catch {} }
   if (!_soMedia.length) { box.innerHTML = '<div style="color:var(--muted);font-size:.8rem;">No generated media yet — make some in Image/Video tabs.</div>'; return; }
-  box.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;max-height:280px;overflow:auto;padding:4px;border:1px solid var(--border,#3334);border-radius:10px;">
-    ${_soMedia.map((m, i) => `
-      <div onclick="soPickMedia(${i})" title="${esc(m.title)}" style="cursor:pointer;border-radius:8px;overflow:hidden;border:2px solid transparent;">
-        ${m.type === 'video'
-          ? `<video src="${API + m.url}" muted style="width:100%;height:90px;object-fit:cover;"></video>`
-          : `<img src="${thumbUrl(m.local_path)}" loading="lazy" decoding="async" style="width:100%;height:90px;object-fit:cover;" onerror="this.onerror=null;this.src='${API + m.url}'">`}
-      </div>`).join('')}
-  </div>`;
+  _soRenderMediaPicker();
 }
+function _soRenderMediaPicker() {
+  const box = document.getElementById('so-media-picker');
+  if (!box) return;
+  const nVid = _soMedia.filter(m => m.type === 'video').length;
+  const nImg = _soMedia.length - nVid;
+  const items = _soMedia.filter(m => _soMediaFilter === 'all' || m.type === _soMediaFilter);
+  const chip = (k, label) => `<button class="btn-sm${_soMediaFilter === k ? ' primary' : ''}" onclick="_soMediaFilter='${k}';_soRenderMediaPicker()">${label}</button>`;
+  box.innerHTML = `
+    <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">
+      <span style="font-size:.72rem;color:var(--muted);">Show:</span>
+      ${chip('all', 'All (' + _soMedia.length + ')')}
+      ${chip('video', '&#127916; Videos (' + nVid + ')')}
+      ${chip('image', '&#128444; Images (' + nImg + ')')}
+      <span style="font-size:.66rem;color:var(--warn);margin-left:4px;">TikTok &amp; YouTube need a &#127916; video.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;max-height:280px;overflow:auto;padding:4px;border:1px solid var(--border,#3334);border-radius:10px;">
+      ${items.length ? items.map(m => {
+        const i = _soMedia.indexOf(m);
+        const isVid = m.type === 'video';
+        const badge = isVid
+          ? '<span style="position:absolute;top:3px;left:3px;background:rgba(34,197,94,.92);color:#fff;font-size:.58rem;font-weight:700;padding:1px 5px;border-radius:4px;">&#127916; VIDEO</span>'
+          : '<span style="position:absolute;top:3px;left:3px;background:rgba(100,116,139,.92);color:#fff;font-size:.58rem;font-weight:700;padding:1px 5px;border-radius:4px;">&#128444; IMAGE</span>';
+        const media = isVid
+          ? `<video src="${API + m.url}" muted style="width:100%;height:90px;object-fit:cover;"></video>`
+          : `<img src="${thumbUrl(m.local_path)}" loading="lazy" decoding="async" style="width:100%;height:90px;object-fit:cover;" onerror="this.onerror=null;this.src='${API + m.url}'">`;
+        return `<div onclick="soPickMedia(${i})" title="${esc(m.title)}" style="cursor:pointer;position:relative;border-radius:8px;overflow:hidden;border:2px solid transparent;">${media}${badge}</div>`;
+      }).join('') : `<div style="color:var(--muted);font-size:.8rem;padding:12px;grid-column:1/-1;">No ${_soMediaFilter} files yet — generate some in the Video/Image tabs.</div>`}
+    </div>`;
+}
+window._soRenderMediaPicker = _soRenderMediaPicker;
 function soPickMedia(i) {
   const m = _soMedia[i]; if (!m) return;
-  _soSel = { media_type: m.type, media_path: m.local_path, media_url: m.url, title: m.title };
+  _soSel = { media_type: m.type, media_path: m.local_path, media_url: m.url, title: m.title,
+             video_id: m.video_id || null, chain_id: m.chain_id || null };
   document.getElementById('so-media-url').value = '';
   document.getElementById('so-media-picker').style.display = 'none';
   soRenderMediaPreview();
@@ -206,6 +330,8 @@ async function soSave() {
     media_type: _soSel ? _soSel.media_type : 'none',
     media_path: _soSel ? (_soSel.media_path || '') : '',
     media_url: _soSel ? (_soSel.media_url || '') : '',
+    video_id: _soSel ? (_soSel.video_id || null) : null,
+    chain_id: _soSel ? (_soSel.chain_id || null) : null,
     scheduled_at: sched || null,
     status: sched ? 'scheduled' : 'draft',
   };
@@ -244,6 +370,68 @@ async function loadSoQueue() {
     </div>
     ${shown.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;">${shown.map(soCardHtml).join('')}</div>`
       : `<div class="empty"><div class="empty-icon">&#128241;</div>No ${_soFilter === 'all' ? '' : _soFilter} posts yet — compose one above.</div>`}`;
+  // fetch publish status for the video posts on screen (small N — the queue is short)
+  shown.filter(p => p.media_type === 'video').forEach(p => soLoadPubs(p.id));
+}
+
+/* ── auto-publish (YouTube + TikTok) ──────────────────────────────────────── */
+async function soLoadPubs(pid) {
+  try {
+    const d = await api(`/api/social/posts/${pid}/publications`);
+    _soPubs[pid] = d.publications || [];
+  } catch { _soPubs[pid] = _soPubs[pid] || []; }
+  soRenderPubChips(pid);
+}
+function soRenderPubChips(pid) {
+  const el = document.getElementById(`so-pubs-${pid}`);
+  if (!el) return;
+  const pubs = _soPubs[pid] || [];
+  if (!pubs.length) { el.innerHTML = ''; return; }
+  el.innerHTML = pubs.map(pub => {
+    const s = pub.status;
+    if (s === 'live') return `<a href="${esc(pub.platform_url || '#')}" target="_blank" rel="noopener"
+      style="font-size:.68rem;color:#22c55e;text-decoration:none;" title="Uploaded — open on ${esc(pub.platform)}">&#9654; ${esc(pub.platform)}: live &#8599;</a>`;
+    if (s === 'failed') return `<span style="font-size:.68rem;color:var(--warn,#f87171);" title="${esc(pub.error || 'upload failed')}">&#9888; ${esc(pub.platform)}: failed</span>`;
+    return `<span style="font-size:.68rem;color:var(--accent2);">&#8987; ${esc(pub.platform)}: ${esc(s)}…</span>`;
+  }).join(' ');
+}
+function _soPubInfo(plat) {
+  if (plat === 'youtube') return { label: 'YouTube', connected: _soYt.connected,
+    msg: `Upload this post's video to YouTube now? It uploads as "${_soYt.privacy}" (change via the social_youtube_privacy setting).` };
+  if (plat === 'tiktok') return { label: 'TikTok', connected: _soTk.connected,
+    msg: `Upload this post's video to TikTok now? It posts as "${_soTk.privacy}"${_soTk.audited
+      ? ' (change via the social_tiktok_privacy setting)'
+      : " — private to you, because the app hasn't passed TikTok's audit yet (public posting unlocks after approval; then set tiktok_audited=1)"}.` };
+  if (plat === 'instagram') return { label: 'Instagram', connected: _soIg.connected,
+    msg: `Publish this post's video as an Instagram Reel now${_soIg.ig_username ? ' on @' + _soIg.ig_username : ''}? It goes PUBLIC immediately — Meta's API has no privacy setting.` };
+  if (plat === 'facebook') return { label: 'Facebook', connected: _soIg.fb_connected,
+    msg: `Post this video to your Facebook Page now? It goes PUBLIC immediately — Meta's API has no privacy setting.` };
+  return { label: plat, connected: false, msg: `Publish to ${plat}?` };
+}
+async function soPublish(pid, plat) {
+  const { label, connected, msg } = _soPubInfo(plat);
+  if (!connected) { toast(`Connect ${label} first (Platform connections above)`, 'error'); return; }
+  if (!confirm(msg)) return;
+  try {
+    const r = await api(`/api/social/posts/${pid}/publish`, { method: 'POST', body: JSON.stringify({ platforms: [plat] }) });
+    if (r.already_live) { toast(`Already live on ${label}`); await soLoadPubs(pid); return; }
+    toast(`⬆️ Uploading to ${label}…`);
+    soPollPubs(pid);
+  } catch (e) { toast('Publish failed: ' + e.message, 'error'); }
+}
+
+function soPublishYt(pid) { return soPublish(pid, 'youtube'); }
+function soPollPubs(pid, tries = 0) {
+  if (_soPubTimer) clearTimeout(_soPubTimer);
+  _soPubTimer = setTimeout(async () => {
+    await soLoadPubs(pid);
+    const pubs = _soPubs[pid] || [];
+    const busy = pubs.some(p => p.status === 'pending' || p.status === 'uploading' || p.status === 'processing');
+    if (busy && tries < 60) { soPollPubs(pid, tries + 1); return; }
+    const live = pubs.find(p => p.status === 'live');
+    if (live) { toast(`✅ Live on ${live.platform}` + (live.platform_url ? ': ' + live.platform_url : '')); await loadSoQueue(); }
+    else if (pubs.some(p => p.status === 'failed')) toast('Upload failed — see the status chip', 'error');
+  }, tries === 0 ? 1200 : 3000);
 }
 function soSetFilter(f) { _soFilter = f; loadSoQueue(); }
 
@@ -277,8 +465,13 @@ function soCardHtml(p) {
         </div>
         <div style="font-size:.82rem;line-height:1.4;white-space:pre-wrap;max-height:96px;overflow:auto;">${esc(p.caption || '')}</div>
         ${p.hashtags ? `<div style="font-size:.74rem;color:var(--accent2);">${esc(p.hashtags)}</div>` : ''}
+        <div id="so-pubs-${p.id}" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:auto;">${openBtns}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border,#3333);padding-top:8px;">
+          ${p.media_type === 'video' && _soYt.connected ? `<button class="btn-sm primary" onclick="soPublish(${p.id},'youtube')" title="Actually upload this post's video to your YouTube channel via the API (default privacy: ${esc(_soYt.privacy)}).">&#9654; Publish to YouTube</button>` : ''}
+          ${p.media_type === 'video' && _soTk.connected ? `<button class="btn-sm primary" onclick="soPublish(${p.id},'tiktok')" title="Actually post this video to your TikTok account via the API (privacy: ${esc(_soTk.privacy)}${_soTk.audited ? '' : ' — private until TikTok audits the app'}).">&#127925; Publish to TikTok</button>` : ''}
+          ${p.media_type === 'video' && _soIg.connected ? `<button class="btn-sm primary" onclick="soPublish(${p.id},'instagram')" title="Actually publish this video as a Reel on your Instagram Business account${_soIg.ig_username ? ' (@' + esc(_soIg.ig_username) + ')' : ''} via the Meta API. Reels go PUBLIC immediately.">&#128248; Publish to Instagram</button>` : ''}
+          ${p.media_type === 'video' && _soIg.fb_connected ? `<button class="btn-sm primary" onclick="soPublish(${p.id},'facebook')" title="Actually post this video to your Facebook Page via the Meta API. Page videos go PUBLIC immediately.">&#127760; Publish to Facebook</button>` : ''}
           <button class="btn-sm" onclick="soCopy(${p.id})" title="Copy the caption and hashtags to your clipboard, ready to paste into the platform app.">&#128203; Copy</button>
           <button class="btn-sm" onclick="soEdit(${p.id})">&#9998; Edit</button>
           ${p.status !== 'posted' ? `<button class="btn-sm" onclick="soMarkPosted(${p.id})" title="Mark this post as posted (moves it to the Posted tab). It does NOT post for you — use it after you have posted it yourself.">&#10003; Mark posted</button>` : ''}
@@ -318,7 +511,7 @@ function soEdit(id) {
   document.getElementById('so-hashtags').value = p.hashtags || '';
   document.getElementById('so-sched').value = p.scheduled_at || '';
   document.querySelectorAll('.so-plat-chk').forEach(c => c.checked = (p.platforms || []).includes(c.value));
-  _soSel = (p.media_url || p.media_path) ? { media_type: p.media_type, media_path: p.media_path, media_url: p.media_url, title: '' } : null;
+  _soSel = (p.media_url || p.media_path) ? { media_type: p.media_type, media_path: p.media_path, media_url: p.media_url, title: '', video_id: p.video_id || null, chain_id: p.chain_id || null } : null;
   soRenderMediaPreview(); soUpdateCharcount();
   document.getElementById('social-compose').scrollIntoView({ behavior: 'smooth' });
 }
@@ -338,3 +531,12 @@ window.soOpenPost = soOpenPost;
 window.soMarkPosted = soMarkPosted;
 window.soDelete = soDelete;
 window.soEdit = soEdit;
+window.soConnectYouTube = soConnectYouTube;
+window.soDisconnectYouTube = soDisconnectYouTube;
+window.soConnectTikTok = soConnectTikTok;
+window.soDisconnectTikTok = soDisconnectTikTok;
+window.soConnectInstagram = soConnectInstagram;
+window.soDisconnectInstagram = soDisconnectInstagram;
+window.soPublish = soPublish;
+window.soPublishYt = soPublishYt;
+window.soLoadPubs = soLoadPubs;

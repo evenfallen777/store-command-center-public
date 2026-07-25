@@ -320,9 +320,13 @@ def get_combined_stats():
     esecret = s.get("etsy_shared_secret", "")
     eexp    = int(s.get("etsy_token_expires", "0"))
     if ek and etok and eid:
+        import etsy_client as _ec
         try:
-            # Auto-refresh token if expired or expiring soon
+            # Auto-refresh token if expired or expiring soon. Known-stale auth
+            # short-circuits to the reconnect CTA instead of re-spamming Etsy.
             if time.time() >= eexp - 120 and etref:
+                if _ec.auth_needs_reconnect():
+                    raise EtsyAuthError("Etsy authorization expired")
                 tokens = refresh_access_token(ek, etref, client_secret=esecret or None)
                 etok   = tokens["access_token"]
                 new_exp = int(time.time()) + tokens.get("expires_in", 3600)
@@ -332,9 +336,14 @@ def get_combined_stats():
                 _c.commit()
                 _c.close()
             result["etsy"] = EtsyClient(ek, etok, eid, shared_secret=esecret).get_shop_stats()
+        except EtsyAuthError:
+            # Stale OAuth (logged once by etsy_client) — clean reconnect CTA, no raw 400.
+            result["error"]["etsy"] = "Etsy authorization expired — reconnect Etsy."
+            result["etsy_reconnect"] = True
         except Exception as e:
             err_str = str(e)
             if "401" in err_str or "Unauthorized" in err_str:
                 err_str = "Etsy token expired — please reconnect in Settings."
+                result["etsy_reconnect"] = True
             result["error"]["etsy"] = err_str
     return result

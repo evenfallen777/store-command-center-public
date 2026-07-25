@@ -149,7 +149,7 @@ def require_visible():
 # apply here).
 _MINORS_RX = re.compile(
     r"\b(child|children|childlike|kid|kids|minor|minors|under[\s-]?age[d]?|"
-    r"infant|toddler|baby|bab(?:ies)|preteen|pre[\s-]?teen|tween|teen|teens|"
+    r"infant|toddler|newborn|preteen|pre[\s-]?teen|tween|teen|teens|"
     r"teenage[rs]?|adolescent|juvenile|schoolgirl|school[\s-]?girl|schoolboy|"
     r"school[\s-]?boy|high[\s-]?school|middle[\s-]?school|loli|lolita|shota|"
     r"jailbait|cp)\b", re.I)
@@ -172,13 +172,10 @@ _NONCONSENT_RX = re.compile(
     r"blackmail(?:ed|ing)?|kidnap(?:ped|ping)?|incest|abduct(?:ed|ion)?)\b", re.I)
 
 
-def safety_check(*texts) -> str | None:
-    """Return a refusal reason if any text trips the safety floor, else None.
-    Applied to EVERY nsfw prompt (all modalities, all callers — user-typed,
-    model-authored, world hook) before anything is written to the DB or run."""
-    blob = " ".join(t for t in texts if t)
-    if not blob.strip():
-        return None
+# ── HARD floor — ALWAYS enforced, no toggle, ever: genuinely illegal content
+# (minors/CSAM and sexual deepfakes of real identifiable people / NCII). No
+# setting, prompt, API or UI can weaken or bypass this tier.
+def _hard_reason(blob: str) -> str | None:
     if _MINORS_RX.search(blob):
         return "content involving minors is refused"
     for rx in _AGE_RXES:
@@ -190,8 +187,38 @@ def safety_check(*texts) -> str | None:
                 continue
     if _DEEPFAKE_RX.search(blob):
         return "real-person / deepfake content is refused"
+    return None
+
+
+# ── SOFT filter — owner-toggleable (Settings → Private Studio, `nsfw_content_filter`,
+# default ON). The fictional non-consent tier; owner discretion for a private studio.
+# Turning it OFF never affects the HARD floor above.
+def _soft_reason(blob: str) -> str | None:
     if _NONCONSENT_RX.search(blob):
         return "non-consensual themes are refused"
+    return None
+
+
+def _soft_filter_on() -> bool:
+    try:
+        from deps import get_setting
+        return str(get_setting("nsfw_content_filter", "1")).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return True   # fail safe: keep the soft filter ON if the setting can't be read
+
+
+def safety_check(*texts) -> str | None:
+    """Refusal reason if a text trips the safety floor, else None. The HARD floor
+    (minors/CSAM + real-person deepfake) ALWAYS applies; the SOFT tier (non-consent)
+    is gated by the `nsfw_content_filter` toggle (default on)."""
+    blob = " ".join(t for t in texts if t)
+    if not blob.strip():
+        return None
+    hard = _hard_reason(blob)
+    if hard:
+        return hard
+    if _soft_filter_on():
+        return _soft_reason(blob)
     return None
 
 

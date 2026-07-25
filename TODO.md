@@ -449,6 +449,92 @@ IN PROGRESS: miner yields to the queue (owner picked "pause mining when busy") �
 mirrors the existing gpu_guard pattern in reverse, with hysteresis + a toggle.
 NOTE: the running miner on the node must be REDEPLOYED to pick up client changes.
 
+## 22. 🚀 Public release v0.1.0 — DONE 2026-07-20 (session close; 667 tests green)
+Full flow executed: `master → retail (scrubbed) → public repo main`. Everything below
+is already live — this entry is the handoff, not a task list.
+
+- **Pushed** the pending arc (93 files, +25k lines: bills/budget/ledger, games, plugin
+  host, world HUD+sprites, JLY policy/supply/yield, peer billing, oracle consensus).
+- **MIT LICENSE** added. Chosen because there's no plan to sell the software (RESELL_PLAN
+  is about physical items) and the warranty disclaimer matters for an app that moves real
+  money. Copyright must stay a real name — `RETAIL_LEAK_EXEMPT_LINES` in `retail_scrub.py`
+  is an exact whole-line allowlist for that one line, pinned by 3 tests. Don't widen it.
+- **Dropped `app/library/openclaw-docs`** from the public tree (~684 files / 9.2 MB of
+  third-party docs, no licence or attribution — not ours to redistribute). Public clone
+  64 MB → 54.7 MB. Library categories come from `iterdir()`, so nothing breaks.
+- **README**: Systems section rewritten to match the real nav, plus a new "What's gated"
+  section. Two stale counts corrected — 50 prompts (not 29), 7 scheduled defenses (not 14).
+- **v0.1.0** tagged + GitHub Release published; repo description + 9 topics set.
+
+### ⚠️ Left open — pick these up next session
+
+1. **WIKI IS BLOCKED ON ONE MANUAL CLICK.** GitHub won't create `<repo>.wiki.git` until a
+   human makes the first page in the web UI (no API for it). Six finished pages are
+   committed and waiting at `/home/user/projects/store-wiki` with `origin` already set.
+   After creating any page, publish with:
+   `git -C /home/user/projects/store-wiki push origin HEAD:master`
+   **The README already links to `../../wiki`, so those links 404 until this happens.**
+2. **XMR mining has no toggle and no agent gate** — unlike Pearl and JellyCoin, which each
+   have both (`pearl_mining_enabled` + `pearl_agent_access`). Reads as an oversight, not a
+   decision, and it's a small fix. It is currently documented publicly as a known gap.
+3. **The gates docs are now a public promise.** README "What's gated" + the wiki gates page
+   openly list what is NOT gated (XMR mining, social posting, Portal→Woo push, outbound
+   mail, Docker control, GPU-node SSH, unsandboxed default-enabled plugins, the localhost
+   auth bypass). Close any of those gaps → update BOTH docs.
+4. **`INDEX.md` is stale** in the same ways the README was: it references an `app-main.js`
+   that doesn't exist (dispatch is `app-nav.js`), still lists Treasury/Crypto/Wallets/Money
+   as top-level instead of Finance panes, and omits Finance, Oracle, Games, Research Lab,
+   Private Studio, Bills and P&L.
+
+## 23. 💝 Donation / support rails — TODO (store + WordPress + public repo)
+Add a way for people to give money. Three surfaces, and there's already more plumbing
+built for this than it looks.
+
+**What already exists — reuse, don't rebuild:**
+- **Cash App rail** (`app/routers/cashapp.py`) — `$cashtag` payment link + QR is live and
+  free; the Square Cash App Pay checkout rail is built but needs a Square account to go
+  live. Both are already prayer-gated (`cashapp_request`, `cashapp_checkout`).
+- **PayPal** — configured in Treasury (config/verify/withdraw), and payouts are one of the
+  three permanently-gated money-out kinds.
+- Donations are money **IN**, so they belong in the toggleable-gate tier, not behind the
+  irreversible money-out floors. A donate *link* costs nothing and needs no approval; only
+  a payout of what's collected should hit a gate.
+
+**Surfaces to add:**
+1. **Store app** — a small "Support this project" affordance. Natural home is Finance
+   (its own pane, or a card on Overview) with the shared `hlp()` help tooltip. Should be
+   **toggle-controlled and default OFF** so a fresh public clone doesn't ship someone
+   else's donate links — per the "every gate gets a toggle" rule. The cashtag/links belong
+   in Settings → Integrations, encrypted at rest like every other credential.
+2. **WordPress (example.com)** — a donate/support block on the site. Options: a WooCommerce
+   "name your price" product (keeps money in the existing Woo reporting and the Portal
+   push already knows how to talk to Woo), or a plain embedded button. Woo product is
+   probably less work given what's already wired.
+3. **Public repo** — add `.github/FUNDING.yml`. This is the cheapest win of the three:
+   GitHub renders a **Sponsor button** on the repo with zero code. It accepts GitHub
+   Sponsors plus `ko_fi`, `buy_me_a_coffee`, `liberapay`, `patreon`, and arbitrary
+   `custom:` URLs. ⚠️ It lands in the PUBLIC tree, so it must survive the retail scrub —
+   any real handle in it needs a `RETAIL_LEAK_EXEMPT_LINES` entry, exactly like the LICENSE
+   copyright line. Decide deliberately whether a fresh clone should carry those handles at
+   all (probably not — see the toggle-OFF point above).
+
+**Platform: ✅ DECIDED 2026-07-20 — Buy Me a Coffee.** (GoFundMe rejected: it's built for
+a specific finite need with a story and a target, and works badly as an open-ended tip
+jar. BMC is the right shape for ongoing support and takes a smaller cut.)
+
+**⛔ BLOCKED ON ONE INPUT: the Buy Me a Coffee username.** Nothing can be wired until
+there's an account — the handle is the only missing piece. Once it exists, the whole
+first pass is ~15 minutes:
+- `.github/FUNDING.yml` → `buy_me_a_coffee: <username>` (renders the repo Sponsor button)
+- Store: donate pane/card linking `https://buymeacoffee.com/<username>`, toggle default OFF
+- WordPress: support block / "name your price" Woo product pointing at the same link
+- Add the handle line to `RETAIL_LEAK_EXEMPT_LINES` if it must survive the scrub, and
+  decide whether a fresh public clone should carry it at all (default: no)
+
+**Note:** none of this makes money on its own. Per the income-ops review, the store's
+money loop still isn't closed (nothing sold yet) — donation rails are a supplement to
+that, not a substitute for finishing it.
+
 ## Older list (pre-2026-07-19 — believed done, verify then delete)
 - Tab navigation mapping fixes (image-gen, videos, cults3d, resell, library) — done per tabs-fix arc
 - Settings Pi-hole/security context — reworked in Security Command Center overhaul

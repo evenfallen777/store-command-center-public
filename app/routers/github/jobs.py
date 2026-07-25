@@ -7,7 +7,6 @@ from typing import Optional
 from deps import *   # get_conn, threading, config (GIT_BIN, REPO_*, RESTART_CMD), HTTPException
 import swarm
 from ._base import router, _gitc
-from .models import get_swarm_config
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17,11 +16,19 @@ class JobIn(BaseModel):
     title: str
     spec: Optional[str] = ""
     repo: Optional[str] = ""
-    branch: Optional[str] = "dev"
+    branch: Optional[str] = None      # default: the project's work_branch (else 'dev')
     autonomy: Optional[str] = None    # override global; gate|auto|step
     scope: Optional[str] = "project"  # project | folder | file
     paths: Optional[list] = None      # file/folder paths the job is scoped to
     agent_count: Optional[int] = None # per-job dynamic N (NULL = global default)
+    project_id: Optional[int] = None  # dev_projects.id (NULL = the primary store project)
+
+
+def _is_primary_project(conn, pid: int) -> bool:
+    """True when pid is the primary store project — its board also owns the
+    legacy jobs whose project_id is NULL (the pre-registry backfill rule)."""
+    row = conn.execute("SELECT is_primary, kind FROM dev_projects WHERE id=?", (pid,)).fetchone()
+    return bool(row and (row["is_primary"] or row["kind"] == "store"))
 
 
 def _job_dict(row) -> dict:
@@ -35,12 +42,20 @@ def _job_dict(row) -> dict:
 
 
 @router.get("/api/github/jobs")
-def list_jobs(status: Optional[str] = None):
+def list_jobs(status: Optional[str] = None, project_id: Optional[int] = None):
     conn = get_conn()
+    where, args = [], []
     if status:
-        rows = conn.execute("SELECT * FROM swarm_jobs WHERE status=? ORDER BY updated_at DESC", (status,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM swarm_jobs ORDER BY updated_at DESC").fetchall()
+        where.append("status=?"); args.append(status)
+    if project_id is not None:
+        if _is_primary_project(conn, project_id):
+            where.append("(project_id=? OR project_id IS NULL)")
+        else:
+            where.append("project_id=?")
+        args.append(project_id)
+    q = "SELECT * FROM swarm_jobs" + (" WHERE " + " AND ".join(where) if where else "") \
+        + " ORDER BY updated_at DESC"
+    rows = conn.execute(q, tuple(args)).fetchall()
     conn.close()
     return [_job_dict(r) for r in rows]
 
@@ -50,11 +65,20 @@ def create_job(body: JobIn):
     if not body.title.strip():
         raise HTTPException(400, "Job title required.")
     conn = get_conn()
+    branch = body.branch
+    if not branch:
+        # default the working branch from the project's work_branch toggle
+        branch = "dev"
+        if body.project_id:
+            row = conn.execute("SELECT work_branch FROM dev_projects WHERE id=?",
+                               (body.project_id,)).fetchone()
+            if row and row["work_branch"]:
+                branch = row["work_branch"]
     cur = conn.execute(
-        "INSERT INTO swarm_jobs (title,spec,repo,branch,autonomy,scope,paths,agent_count,status) "
-        "VALUES (?,?,?,?,?,?,?,?,'proposed')",
-        (body.title.strip(), body.spec, body.repo, body.branch or "dev", body.autonomy,
-         body.scope or "project", json.dumps(body.paths or []), body.agent_count))
+        "INSERT INTO swarm_jobs (title,spec,repo,branch,autonomy,scope,paths,agent_count,project_id,status) "
+        "VALUES (?,?,?,?,?,?,?,?,?,'proposed')",
+        (body.title.strip(), body.spec, body.repo, branch, body.autonomy,
+         body.scope or "project", json.dumps(body.paths or []), body.agent_count, body.project_id))
     conn.commit()
     jid = cur.lastrowid
     scope_note = ""
@@ -94,7 +118,8 @@ def update_job(jid: int, body: dict):
         body["paths"] = json.dumps(body["paths"])
     fields = {k: v for k, v in body.items()
               if k in ("title", "spec", "repo", "branch", "autonomy", "status",
-                       "cron_enabled", "cron_interval", "scope", "paths", "agent_count")}
+                       "cron_enabled", "cron_interval", "scope", "paths", "agent_count",
+                       "project_id")}
     if not fields:
         raise HTTPException(400, "Nothing to update.")
     sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=datetime('now')"
@@ -134,8 +159,100 @@ def answer_question(qid: int, body: AnswerIn):
     conn.execute("INSERT INTO swarm_events (job_id,agent,kind,content) VALUES (?,?,?,?)",
                  (q["job_id"], "you", "answer", body.answer))
     conn.commit()
+    # A blocking question (any stage) parked the job at awaiting_input — when the
+    # LAST open question is answered, resume the drive automatically.
+    remaining = conn.execute("SELECT COUNT(*) c FROM swarm_questions WHERE job_id=? AND status='open'",
+                             (q["job_id"],)).fetchone()["c"]
+    jrow = conn.execute("SELECT status FROM swarm_jobs WHERE id=?", (q["job_id"],)).fetchone()
     conn.close()
-    return {"ok": True}
+    resumed = False
+    if remaining == 0 and jrow and jrow["status"] == "awaiting_input":
+        resumed = swarm.start_job(q["job_id"])
+        if resumed:
+            _swarm_event(q["job_id"], "system", "system",
+                         "▶️ All questions answered — resuming the swarm with your answers.")
+    return {"ok": True, "resumed": resumed}
+
+
+# ── Two-way Q&A around a job: owner directives + pure questions ─────────────
+class DirectIn(BaseModel):
+    text: str
+
+
+@router.post("/api/github/jobs/{jid}/direct")
+def direct_job(jid: int, body: DirectIn):
+    """Inject an OWNER DIRECTIVE into a job. The engine picks up unconsumed
+    directives at the next stage boundary (architect/coder/reviewer turn) and
+    incorporates them into that turn's prompt — not mid-LLM-turn, so expect the
+    change at the next stage. If the job is paused/awaiting input, the
+    directive also resumes it (directing instead of answering unblocks it)."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Directive text required.")
+    conn = get_conn()
+    row = conn.execute("SELECT status FROM swarm_jobs WHERE id=?", (jid,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, "Job not found")
+    conn.execute("INSERT INTO swarm_directives (job_id,text) VALUES (?,?)", (jid, text))
+    conn.execute("INSERT INTO swarm_events (job_id,agent,kind,content) VALUES (?,?,?,?)",
+                 (jid, "you", "directive", "🧭 " + text))
+    conn.commit(); conn.close()
+    resumed = False
+    if row["status"] in ("paused", "awaiting_input") and not swarm.is_running(jid):
+        resumed = swarm.start_job(jid)
+        if resumed:
+            _swarm_event(jid, "system", "system", "▶️ Resumed by your directive.")
+    return {"ok": True, "resumed": resumed,
+            "note": "The crew incorporates this at its next stage boundary."}
+
+
+class AskIn(BaseModel):
+    question: str
+
+
+@router.post("/api/github/jobs/{jid}/ask")
+def ask_job(jid: int, body: AskIn):
+    """Ask the swarm ABOUT a job — one LM Studio turn answering from the job's
+    context (spec, plan, latest commit, recent timeline). Pure Q&A: it never
+    changes the job's status, plan, or code."""
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(400, "Question required.")
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM swarm_jobs WHERE id=?", (jid,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, "Job not found")
+    job = dict(row)
+    events = conn.execute(
+        "SELECT agent,kind,content FROM swarm_events WHERE job_id=? ORDER BY id DESC LIMIT 12",
+        (jid,)).fetchall()
+    conn.close()
+    try:
+        base = swarm._job_workdir(job)
+        rc, head = _gitc(base, "show", "--stat", "--oneline", "-s", "HEAD")
+    except Exception:
+        head = ""
+    ctx = (f"JOB #{jid}: {job['title']}  (status: {job['status']}, branch: {job.get('branch')})\n"
+           f"SPEC:\n{(job.get('enhanced_spec') or job.get('spec') or '')[:3000]}\n"
+           f"PLAN: {(job.get('plan') or '')[:1200]}\n"
+           f"LATEST COMMIT: {head[:400]}\n"
+           "RECENT TIMELINE (newest first):\n"
+           + "\n".join(f"[{e['agent']}/{e['kind']}] {(e['content'] or '')[:220]}" for e in events))
+    _swarm_event(jid, "you", "user_q", question)
+    sys_p = ("You are a dev-swarm agent answering the OWNER's question about one of your jobs. "
+             "Answer concisely and concretely from the provided job context. This is informational "
+             "only — do NOT propose new work, do NOT change course, just explain.")
+    try:
+        cfg = swarm._config()
+        roster = swarm._roster(cfg, 1)
+        if not roster:
+            raise RuntimeError("no local models configured")
+        answer = swarm._turn(roster["planner"], sys_p,
+                             ctx + f"\n\nOWNER'S QUESTION: {question}", max_tokens=800).strip()
+    except Exception as e:
+        answer = f"(The crew couldn't answer right now: {e})"
+    _swarm_event(jid, "swarm", "agent_a", answer)
+    return {"ok": True, "answer": answer}
 
 
 # ── User final approval — only YOU approve/reject; reject needs a comment ────
@@ -287,10 +404,84 @@ def run_job(jid: int):
 # public branch never ships the real identifiers it maps from).
 
 
+def _job_project_row(job_row):
+    """The job's dev_projects row (dict) via project_id; NULL = primary store."""
+    conn = get_conn()
+    row = None
+    try:
+        pid = job_row["project_id"]
+    except (KeyError, IndexError):
+        pid = None
+    if pid:
+        row = conn.execute("SELECT * FROM dev_projects WHERE id=?", (pid,)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT * FROM dev_projects WHERE is_primary=1 OR kind='store' "
+                           "ORDER BY is_primary DESC, id LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _promote_external(project: dict, jid: int) -> list:
+    """Promote a NON-store project to its main: merge its dev branch into the
+    live branch in the project's single checkout, push origin. Same policy as
+    the store — reaching main is NOT going live."""
+    base = project.get("local_path") or project.get("dev_path")
+    if not base:
+        raise HTTPException(400, "Project has no local checkout to promote in.")
+    live = project.get("live_branch") or "main"
+    steps = []
+
+    def log_step(name, rc, out):
+        steps.append({"step": name, "ok": rc == 0, "detail": out[:300]})
+
+    rc, out = _gitc(base, "status", "--porcelain")
+    if out.strip():
+        _gitc(base, "add", "-A")
+        _gitc(base, "commit", "-m", f"swarm job #{jid}: finalize")
+    rc, out = _gitc(base, "push", "origin", "dev"); log_step("push dev", rc, out)
+    rc, out = _gitc(base, "checkout", live); log_step(f"checkout {live}", rc, out)
+    if rc != 0:
+        raise HTTPException(409, f"Could not checkout {live}: {out[:200]}")
+    rc, out = _gitc(base, "merge", "dev", "--no-edit"); log_step(f"merge dev→{live}", rc, out)
+    if rc != 0:
+        _gitc(base, "merge", "--abort")
+        _gitc(base, "checkout", "dev")
+        _swarm_event(jid, "system", "error", f"Promote failed at merge; {live} unchanged.\n" + out)
+        raise HTTPException(409, f"Merge conflict — aborted. {live} unchanged. {out[:200]}")
+    rc, out = _gitc(base, "push", "origin", live); log_step(f"push {live}", rc, out)
+    _gitc(base, "checkout", "dev")   # leave the checkout back on the working branch
+    return steps
+
+
+def _bump_version(part: str = "patch") -> tuple:
+    """Bump /VERSION in REPO_MASTER (semver). The version is the PUBLIC release
+    number and per policy changes ONLY here (the public/retail publish step) —
+    never on ordinary master/dev commits. Returns (old, new). Defaults to a
+    patch bump; pass 'minor' or 'major' via the promote body's version_bump."""
+    import os, re
+    vpath = os.path.join(REPO_MASTER, "VERSION")
+    try:
+        old = open(vpath).read().strip()
+    except Exception:
+        old = "0.1.0"
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", old or "")
+    M, mi, p = (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else (0, 1, 0)
+    if part == "major":   M, mi, p = M + 1, 0, 0
+    elif part == "minor": mi, p = mi + 1, 0
+    else:                 p = p + 1
+    new = f"{M}.{mi}.{p}"
+    with open(vpath, "w") as f:
+        f.write(new + "\n")
+    return old, new
+
+
 @router.post("/api/github/jobs/{jid}/promote")
 def promote_job(jid: int, body: dict = None):
-    """Promote an approved job's dev work: merge dev→master (+push), then resync +
-    re-genericize retail (+push). The running app keeps old code until you restart."""
+    """Promote an approved job's dev work to MAIN: merge dev→master, push origin
+    dev + master, then resync + re-genericize retail (+push). Reaching main is
+    NOT going live — the running app is untouched until 'Apply main → live store'
+    (POST /api/github/update-live) runs: your click, or automatically right after
+    this promote when the project opted into auto_go_live (store/primary only)."""
     body = body or {}
     conn = get_conn()
     row = conn.execute("SELECT * FROM swarm_jobs WHERE id=?", (jid,)).fetchone()
@@ -298,7 +489,18 @@ def promote_job(jid: int, body: dict = None):
     if not row:
         raise HTTPException(404, "Job not found")
     if row["decision"] != "approved":
-        raise HTTPException(400, "Approve the job first — only you can approve.")
+        raise HTTPException(400, "Approve the job first (you, or the reviewer swarm in swarm/either review mode).")
+    project = _job_project_row(row)
+    if project and (project.get("kind") or "store") != "store":
+        # non-store project: merge its dev branch into its live branch + push
+        steps = _promote_external(project, jid)
+        _set_job_status(jid, "done",
+                        f"On {project.get('live_branch') or 'main'} (pushed). Not live/deployed by this app.")
+        _swarm_event(jid, "system", "system",
+                     f"✅ On main ({project.get('live_branch') or 'main'} pushed). "
+                     + "; ".join(f"{s['step']}={'ok' if s['ok'] else 'FAIL'}" for s in steps))
+        return {"ok": True, "steps": steps, "restarting": False,
+                "note": f"Merged and pushed to {project.get('live_branch') or 'main'}."}
     steps = []
 
     def log_step(name, rc, out):
@@ -309,6 +511,8 @@ def promote_job(jid: int, body: dict = None):
     if out.strip():
         _gitc(REPO_DEV, "add", "-A")
         _gitc(REPO_DEV, "commit", "-m", f"swarm job #{jid}: finalize")
+    # 1b. make sure the GitHub dev branch has everything (stage 2 of the pipeline)
+    rc, out = _gitc(REPO_DEV, "push", "origin", "dev"); log_step("push dev", rc, out)
     # 2. master may be dirty with UNRELATED concurrent work (other tabs being built).
     #    If the swarm's changes don't overlap those files, safely stash them, merge,
     #    and restore afterwards. If they overlap, refuse and say exactly what's blocking.
@@ -347,6 +551,14 @@ def promote_job(jid: int, body: dict = None):
             _swarm_event(jid, "system", "error",
                          "Stashed work could not auto-restore — recover it with `git stash pop` "
                          f"in {REPO_MASTER}. {out[:200]}")
+    # 5a. VERSION bumps ONLY here — the public release. Bump master's /VERSION so the
+    #     scrubbed retail tree below carries the new number, and advance master (commit
+    #     the single VERSION file only — never -A on the shared worktree).
+    old_v, new_v = _bump_version((body.get("version_bump") or "patch"))
+    _gitc(REPO_MASTER, "add", "VERSION")
+    rc, out = _gitc(REPO_MASTER, "commit", "-m", f"release: v{new_v}")
+    log_step(f"version {old_v} → {new_v}", rc, out)
+    rc, out = _gitc(REPO_MASTER, "push", "origin", "master"); log_step("push master (release)", rc, out)
     # 5. resync retail to master, scrub for PUBLIC release, republish. retail must carry
     #    no real IPs/domains/identity/private docs, AND none of master's history (which
     #    still holds them). We CHAIN each publish onto the PREVIOUS public commit (never
@@ -381,7 +593,7 @@ def promote_job(jid: int, body: dict = None):
         ct_args = ["commit-tree", tree.strip()]
         if prev_retail:
             ct_args += ["-p", prev_retail]
-        ct_args += ["-m", f"Store Command Center — public release (genericized, job #{jid})"]
+        ct_args += ["-m", f"Store Command Center v{new_v} — public release (genericized, job #{jid})"]
         rc2, commit = _gitc(REPO_RETAIL, *ct_args)
         if rc2 == 0 and commit.strip():
             rc, out = _gitc(REPO_RETAIL, "reset", "--hard", commit.strip())
@@ -393,18 +605,28 @@ def promote_job(jid: int, body: dict = None):
         else:
             log_step("retail commit-tree", 1, commit)
 
-    # The merge already wrote the new code to the master worktree on disk, so the LIVE
-    # app just needs a restart to load it (no GitHub pull needed for this instance).
-    will_restart = bool(get_swarm_config().get("restart_after_promote"))
+    # Reaching main is NOT going live. The merge wrote new code to the master
+    # worktree on disk and origin/master is updated, but the running app is
+    # deliberately untouched — NO restart here (restart_after_promote is ignored
+    # by design). 'Apply main → live store' (POST /api/github/update-live) is the
+    # only path that pulls main into the running store — by your click, or
+    # automatically below when the project opted into auto_go_live.
     _set_job_status(jid, "done",
-                    "Promoted dev → master → retail." + (" Restarting…" if will_restart else " Restart to run the new code."))
-    _swarm_event(jid, "you", "system",
-                 "Promoted: " + "; ".join(f"{s['step']}={'ok' if s['ok'] else 'FAIL'}" for s in steps))
-    if will_restart:
-        _restart_live()
-    return {"ok": True, "steps": steps, "restarting": will_restart,
-            "note": ("Restarting the live app to load the promoted code…" if will_restart
-                     else "Restart the store (Settings → Restart Server, or the Restart button here) to load it.")}
+                    "On main (dev→master pushed). Not applied to the live store yet — "
+                    "click '⬆️ Apply main → live store' to run it.")
+    _swarm_event(jid, "system", "system",
+                 "✅ On main (dev→master pushed). Not applied to the live store yet — click "
+                 "'⬆️ Apply main → live store' to run it. Steps: "
+                 + "; ".join(f"{s['step']}={'ok' if s['ok'] else 'FAIL'}" for s in steps))
+    # Opt-in auto go-live (store/primary only — the one running instance we control):
+    # review_mode=swarm + auto_go_live=1 is the fully-autonomous chain; both default off.
+    auto_applied = False
+    if project and project.get("auto_go_live"):
+        auto_applied = _auto_go_live(jid)
+    return {"ok": True, "steps": steps, "restarting": auto_applied, "auto_go_live": auto_applied,
+            "note": ("Auto go-live: applying main to the live store and restarting…" if auto_applied else
+                     "On main — not live. Click '⬆️ Apply main → live store' (Workboard or God "
+                     "Console) when you want the running store to pull main and restart.")}
 
 
 def _restart_live():
@@ -425,6 +647,111 @@ def restart_live():
     """Restart the live app now (loads any promoted code sitting in the master worktree)."""
     _restart_live()
     return {"ok": True, "message": "Restarting… the app will be back in a few seconds."}
+
+
+# ── Update to LIVE — the ONLY path that pulls main into the running app ──────
+_live_fetch = {"t": 0.0}   # throttle origin fetches from the 5s board poll
+
+
+@router.get("/api/github/live-status")
+def live_status():
+    """Is an update available? Compares the LIVE worktree HEAD to origin/master
+    (fetched at most once a minute — the board polls this every 5s). Also counts
+    promoted-but-not-deployed jobs so the UI can say 'N approved changes are on
+    main but not yet live.'"""
+    import time as _t
+    now = _t.time()
+    if now - _live_fetch["t"] > 60:
+        _live_fetch["t"] = now
+        _gitc(REPO_MASTER, "fetch", "origin", "master", timeout=30)   # best-effort
+    rc, head = _gitc(REPO_MASTER, "rev-parse", "--short", "HEAD")
+    rc2, remote = _gitc(REPO_MASTER, "rev-parse", "--short", "origin/master")
+    behind = ahead = 0
+    rc3, counts = _gitc(REPO_MASTER, "rev-list", "--left-right", "--count", "HEAD...origin/master")
+    if rc3 == 0 and "\t" in counts:
+        a, b = counts.split("\t")[:2]
+        ahead, behind = int(a.strip() or 0), int(b.strip() or 0)
+    conn = get_conn()
+    pending = conn.execute(
+        "SELECT COUNT(*) c FROM swarm_jobs WHERE status='done' AND deployed_at IS NULL").fetchone()["c"]
+    conn.close()
+    return {"head": head.strip() or None, "remote_head": remote.strip() or None,
+            "ahead": ahead, "behind": behind,
+            "update_available": behind > 0 or pending > 0,
+            "pending_done": pending}
+
+
+def _apply_main_to_live() -> dict:
+    """The shared body of 'Apply main → live store': fetch origin/master and
+    fast-forward the LIVE worktree onto it (idempotent parity with GitHub main),
+    stamp the promoted jobs deployed. Does NOT restart — callers decide how
+    (endpoint: immediately; auto-go-live: deferred after commits + God note).
+    Raises HTTPException(409) when the live worktree can't fast-forward."""
+    steps = []
+
+    def log_step(name, rc, out):
+        steps.append({"step": name, "ok": rc == 0, "detail": out[:300]})
+
+    rc, out = _gitc(REPO_MASTER, "fetch", "origin", "master", timeout=60)
+    log_step("fetch origin master", rc, out)
+    rc, out = _gitc(REPO_MASTER, "merge", "--ff-only", "origin/master")
+    log_step("ff-merge origin/master", rc, out)
+    if rc != 0:
+        raise HTTPException(409, "Live worktree could not fast-forward onto origin/master "
+                                 f"(dirty or diverged): {out[:200]}")
+    was_current = "up to date" in out.lower()
+    rc, head = _gitc(REPO_MASTER, "rev-parse", "--short", "HEAD")
+    # Mark every promoted ('done') job as deployed: everything on main is, by
+    # definition of the ff-merge above, now contained in the live HEAD. (Simple
+    # mark-all-done approach — jobs don't record their own commit SHAs.)
+    conn = get_conn()
+    cur = conn.execute("UPDATE swarm_jobs SET deployed_at=datetime('now') "
+                       "WHERE status='done' AND deployed_at IS NULL")
+    marked = cur.rowcount
+    conn.commit(); conn.close()
+    _live_fetch["t"] = 0.0   # next live-status reflects the new HEAD immediately
+    return {"steps": steps, "updated_to": head.strip() or None,
+            "was_current": was_current, "marked_live": marked}
+
+
+def _auto_go_live(jid: int) -> bool:
+    """Opt-in auto path (dev_projects.auto_go_live=1, store/primary only — the
+    one running instance we control; non-store projects have no separate live
+    to apply, so this is never called for them). Applies main→live, commits all
+    DB writes and posts the God-Console note FIRST, then defers the restart
+    (threading.Timer, like system.update_apply) so everything flushes before
+    the process goes down. Returns True when the apply succeeded."""
+    try:
+        r = _apply_main_to_live()
+    except Exception as e:
+        detail = getattr(e, "detail", None) or str(e)
+        _swarm_event(jid, "system", "error", f"Auto go-live failed (still on main, not applied): {detail}")
+        return False
+    _swarm_event(jid, "system", "system",
+                 f"🚀 Auto go-live: applied main → live store ({r['updated_to']}), "
+                 f"{r['marked_live']} change(s) marked live. Restarting…")
+    try:
+        import world_ops as wo
+        wo.note(f"🚀 Auto go-live: the approved work went live on the store ({r['updated_to']}) "
+                "and the app is restarting. (Per-project toggle: Auto go-live after approval.)",
+                kind="info")
+    except Exception:
+        pass
+    threading.Timer(1.0, _restart_live).start()   # after commits + note are flushed
+    return True
+
+
+@router.post("/api/github/update-live")
+def update_live():
+    """⬆️ Apply main → live store: pulls the approved code on main into THIS
+    running store (fetch + ff-only merge in the live worktree) and restarts it.
+    Distinct from Settings → Updates (/api/system/update-apply), which pulls a
+    published release/public channel. This is the ONLY action that takes 'on
+    main' code live — promote never does (unless auto_go_live opted in)."""
+    r = _apply_main_to_live()
+    _restart_live()          # reuse the existing restart mechanism
+    return {"ok": True, **r, "restarting": True,
+            "note": "Live store is restarting on the new code — back in ~10s."}
 
 
 def _swarm_event(jid, agent, kind, content):

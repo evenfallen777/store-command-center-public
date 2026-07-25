@@ -1,5 +1,5 @@
-async function renderLibrary() {
-  const main = document.getElementById('main-content');
+async function renderLibrary(mount = 'main-content') {
+  const main = document.getElementById(mount);
   main.innerHTML = `
     <div class="view-header">
       <div class="view-title">&#128218; AI Library</div>

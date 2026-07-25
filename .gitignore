@@ -56,3 +56,10 @@ models3d/backlog/
 models3d/hero/
 models3d/renders/
 videos/
+static/docextract_uploads/
+designs/sizes/
+research_media/
+brands/
+
+# Claude Code agent worktrees / local state
+.claude/

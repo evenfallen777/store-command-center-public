@@ -118,13 +118,13 @@ CATALOG = [
     _S("world_orchestra", "Orchestra (macro clock)", "world", "always", tab="world", world_visible=True,
        subsystems=["macro-clock conductor"],
        notes="Always on — no god toggle."),
-    _S("world_rank", "Ranking", "world", "invisible", tab="world", world_visible=False,
-       notes="Runs, but has no leg in the world view. No god toggle."),
-    _S("world_learn", "Adaptive Learning", "world", "invisible", tab="world", world_visible=False,
+    _S("world_rank", "Ranking", "world", "always", tab="world", world_visible=True,
+       notes="Runs, rendered in the world UI. No god toggle."),
+    _S("world_learn", "Adaptive Learning", "world", "always", tab="world", world_visible=True,
        subsystems=["online policy learning", "world_policy"],
-       notes="Runs, invisible. No god toggle."),
-    _S("world_balance", "Balance tuning", "world", "invisible", tab="world", world_visible=False,
-       notes="Every tuning number in one place. Runs, invisible. No god toggle."),
+       notes="Runs, rendered in the world UI. No god toggle."),
+    _S("world_balance", "Balance tuning", "world", "infra", tab="world", world_visible=False,
+       notes="Every tuning number in one place. A pure constants module — no on/off state."),
     _S("world_ops", "God Console (ops backbone)", "world", "always", tab="world", world_visible=True,
        subsystems=["prayers queue", "postpaid budget", "PayPal", "community board"],
        notes="The safety backbone — approval queue + real-money ledger (world_ops_ledger)."),
@@ -144,6 +144,26 @@ CATALOG = [
     _S("world_sprites", "Per-entity sprite sheets", "world", "toggle",
        setting_key="world_sprites_enabled", tab="world", world_visible=True,
        subsystems=["on-demand action sheets", "auto backfill (off by default)"]),
+    _S("world_era", "Civilization eras", "world", "toggle",
+       setting_key="world_era_enabled", tab="world", world_visible=True,
+       subsystems=["wood→brick→…→moon ladder", "advance/decay cadence"],
+       notes="Cosmetic building restyle by real activity/neglect. Default ON; had no board handle."),
+    _S("world_era_sprites", "Era building art", "world", "toggle",
+       setting_key="world_era_sprites_enabled", tab="world", world_visible=True,
+       subsystems=["generated per-(building,era) pixel art"],
+       notes="Optional generated art over the procedural era restyle. Default OFF. "
+             "Also has a control in Company Control (🏛️ Era building art)."),
+    _S("world_run", "Run mode", "world", "always", tab="world", world_visible=True,
+       subsystems=["normal/fast/test speed", "world_run_mode"],
+       notes="Always ticking; world_run_mode (normal/fast/test) is a 3-way mode, not on/off — "
+             "set via Company Control's ⏱️ Run mode picker, not this board."),
+    _S("world_taste", "Learned taste", "world", "always", tab="world", world_visible=True,
+       subsystems=["thumbs-up/down training", "predicted-approval scoring"],
+       notes="Always scoring; surfaced in the God Console (taste %, examples studied). "
+             "Its gate threshold is world_taste_min — see Control Plane."),
+    _S("world_renew", "Renewal (self-refresh)", "world", "always", tab="world", world_visible=True,
+       subsystems=["oldest-prop re-render", "improvement requests → Town Hall"],
+       notes="Self-cadenced (world_ticker); no god toggle. Suggestions surface in Town Hall."),
 
     # ── Studio & Commerce ────────────────────────────────────────────────────
     _S("studio", "Studio (Image/Video/Audio/3D)", "studio", "always", tab="studio", world_visible=True,
@@ -155,6 +175,19 @@ CATALOG = [
     _S("etsy_printify", "Etsy / Printify", "studio", "always", tab="etsy-printify", world_visible=False,
        subsystems=["trend scan", "proposals", "publish"],
        notes="INVISIBLE — the storefront/trends desks are dead."),
+    _S("proposal_gate", "Proposal Review Gate", "studio", "toggle",
+       setting_key="proposal_gate_enabled", tab="etsy-printify",
+       subsystems=["LLM judge", "dedup", "auto-weed"],
+       notes="LLM judge scores pending proposals 0-100 and weeds/queues them per "
+             "proposal_gate_mode (score_only | auto_weed | full_auto). Scheduler runs it "
+             "every proposal_gate_interval_min in proposal_gate_batch_size bites; "
+             "toggles in Settings → Store & Content."),
+    _S("proposal_desk", "Proposal Desk (lanes + feeds)", "studio", "toggle",
+       setting_key="proposal_desk_enabled", tab="etsy-printify",
+       subsystems=["proposal lanes", "news feed groups", "agent suggestions", "etsy demand signal"],
+       notes="Multi-lane proposal origination (proposal_desk.py): categorized news feeds + "
+             "the crew's 'Suggested:' ideas + the Etsy hot/not signal become lane-tagged "
+             "proposals every proposal_desk_interval_min. Company control-plane system."),
     _S("portal", "Portal → WooCommerce", "studio", "always", tab="portal", world_visible=False,
        subsystems=["affiliate items", "portfolio push"],
        notes="INVISIBLE, and no god surface."),
@@ -166,8 +199,17 @@ CATALOG = [
        notes="Desk is dead; gated through world_ops (automation_mode)."),
     _S("social", "Social", "studio", "always", tab="social", world_visible=False,
        notes="INVISIBLE — no world leg."),
-    _S("mail", "Mail & Quotes", "studio", "always", tab="mail", world_visible=False,
-       notes="No department in the world at all."),
+    _S("mail", "Mail & Quotes", "studio", "always", tab="mail", world_visible=True,
+       subsystems=["accounts (IMAP/SMTP + Gmail OAuth)", "business profiles", "FAQ", "order linking"],
+       notes="Config-driven mail desk (mail_engine.py) — multiple accounts, editable "
+             "business profiles drive the reply drafter. The Mail Room dept (Miles) is its world leg."),
+    _S("mail_gate", "Mail auto-reply gate", "studio", "toggle",
+       setting_key="mail_gate_enabled", tab="mail", world_visible=True,
+       subsystems=["triage classifier", "auto drafts", "guardrailed auto-send", "review trail"],
+       notes="The approval gate between incoming email and outgoing replies (mail_gate.py): "
+             "manual | auto_draft | full_auto per mail_gate_mode. Quotes/pricing and anything "
+             "non-routine are ALWAYS held for a human; every action logs to mail_log. "
+             "Scheduler runs it every mail_gate_interval_min in mail_gate_batch_size bites."),
     _S("cults3d", "Cults3D", "studio", "always", tab="cults3d", world_visible=True,
        notes="Rides the 3D desk."),
     _S("library", "Library", "studio", "always", tab="library", world_visible=True,
@@ -178,12 +220,23 @@ CATALOG = [
        notes="Three toggles in Settings → Content (all default off). Not a god surface."),
     _S("oracle", "Oracle", "studio", "always", tab="oracle", world_visible=False,
        notes="INVISIBLE — no world leg."),
+    _S("world_sell", "Autonomous listing", "studio", "toggle",
+       setting_key="world_sell_auto", tab="etsy-printify", world_visible=False,
+       subsystems=["queue Etsy/Printify listing", "revenue sync"],
+       notes="The engine behind Company Control's 'Autonomous listing' toggle; queues drafts "
+             "as prayers for review. Desks it feeds are dead — see etsy_printify."),
 
     # ── Infrastructure, Dev, Security & Crypto ───────────────────────────────
     _S("network_security", "Network Security", "infra", "toggle",
        setting_key="security_monitor_enabled", tab="network-security", world_visible=True,
        subsystems=["Command view", "14 defenses", "Guardian", "AI Shield", "Pi-hole"],
        notes="Wired — the Command view calls all defenses (see app/defense.py)."),
+    _S("world_public_snapshot", "Public world snapshot (→ example.com)", "infra", "toggle",
+       setting_key="world_public_snapshot", tab=None, world_visible=False,
+       subsystems=["render + push to public WordPress", "gate_reason() NSFW gate", "leak sweep"],
+       notes="SECURITY-RELEVANT: the only outbound-to-public path (app/world_snapshot.py, "
+             "polled by scheduler.py). Default OFF. Had ZERO UI until this row — now a real "
+             "toggle. See world_snapshot.py's SECURITY MODEL docstring before flipping it on."),
     _S("dev_swarm", "GitHub / Dev Swarm", "infra", "toggle",
        setting_key="swarm_cron_enabled", tab="github", world_visible=True,
        subsystems=["repo mgmt", "dev→master→retail", "local-model swarm"],
@@ -203,6 +256,10 @@ CATALOG = [
        setting_key="pearl_mining_enabled", tab="crypto", world_visible=False,
        subsystems=["proof-of-useful-work L1", "NVIDIA-only miner"],
        notes="INVISIBLE; miner default OFF."),
+    _S("xmr", "XMR (Monero) mining", "infra", "toggle",
+       setting_key="xmr_mining_enabled", tab="crypto", world_visible=False,
+       subsystems=["xmrig (RandomX, CPU)"],
+       notes="INVISIBLE; miner default OFF. Agent access gated separately (xmr_agent_access)."),
     _S("peers", "Peers / Federation", "infra", "always", tab="github", world_visible=False,
        subsystems=["invite pairing", "advisory reviews", "lent compute"],
        notes="INVISIBLE — no world leg."),
@@ -224,10 +281,8 @@ CATALOG = [
        subsystems=["System", "Models", "Integrations", "Store", "Account", "Prompts", "Systems"],
        notes="One of 5 setting surfaces (this board lives here)."),
     _S("dup_automation_mode", "Automation mode (duplicate surface)", "control", "mode", tab="world",
-       notes="world_ops_automation_mode — mirrored by Company Control's auto-publish toggle."),
-    _S("dup_require_review", "Require-review (duplicate surface)", "control", "toggle",
-       setting_key="world_require_review", tab="world",
-       notes="Duplicated toggle-set. Nothing auto-posts without review."),
+       notes="world_ops_automation_mode — the real posting gate. Formerly also mirrored by Company "
+             "Control's auto-publish toggle; that mirror was dropped as a pure duplicate (2026-07-21)."),
     # 8 (formerly ORPHAN) settings — now given real handles on THIS board.
     # Booleans classify "toggle" (→ enabled/disabled + inline switch); numeric/text
     # settings classify "value" (→ neutral pill + inline editor). No longer orphan.
@@ -237,12 +292,8 @@ CATALOG = [
        setting_key="world_bills_drive", notes="Bills may drive REAL auto-creation — edit inline here."),
     _S("orphan_world_theme", "world_theme", "control", "value", tab="world",
        setting_key="world_theme", notes="World theme string — edit inline here."),
-    _S("orphan_world_layout_autosave", "world_layout_autosave", "control", "toggle", tab="world",
-       setting_key="world_layout_autosave", notes="Play-god map autosave — edit inline here."),
     _S("orphan_world_night_brightness", "world_night_brightness", "control", "value", tab="world",
        setting_key="world_night_brightness", notes="Night brightness (1=default, 0=brightest) — edit inline here."),
-    _S("orphan_world_vision_model", "world_vision_model", "control", "value", tab="world",
-       setting_key="world_vision_model", notes="Fallback VLM model id — edit inline here."),
     _S("orphan_world_prop_matte", "world_prop_matte", "control", "value", tab="world",
        setting_key="world_prop_matte", notes="Bg-removal (matte) model; blank=auto, 'off'=disable — edit inline here."),
     _S("orphan_world_taste_min", "world_taste_min", "control", "value", tab="world",

@@ -24,7 +24,7 @@ from crypto import (enc as _enc, dec as _dec, dec_secrets as _dec_secrets,
                     is_secret as _is_secret, SECRET_KEYS, migrate_encrypt_secrets)
 
 from printify import PrintifyClient
-from etsy_client import EtsyClient, generate_pkce, build_auth_url, exchange_code, refresh_access_token
+from etsy_client import EtsyClient, EtsyAuthError, generate_pkce, build_auth_url, exchange_code, refresh_access_token
 from orchestrator import orch
 from library import (
     list_sections, list_subsections, list_documents, read_document, search_library,
@@ -34,6 +34,8 @@ from library import (
 from trends import (
     fetch_google_trends, fetch_reddit_rss, fetch_rss_feeds,
     generate_proposals_from_trends, DEFAULT_SUBS, DEFAULT_RSS_FEEDS,
+    FEED_GROUPS, LANES, DEFAULT_LANES, feed_group_config, fetch_feed_groups,
+    fetch_reddit_rss_tagged, lane_items, parse_lanes_enabled,
 )
 
 from config import *
