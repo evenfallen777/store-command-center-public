@@ -135,6 +135,82 @@ the revised scene as one JSON object with the same schema
 {"title","summary","voiceover","caption","shots":[...],"sfx":[...]} — nothing else.
 Keep shot count/lengths unless the notes ask otherwise; keep the style thread.""",
               help="Regenerate/steer a single scene from the Director editor."),
+    # ── 📺 TV (prompt-to-television — rides the Director studio; see
+    # docs/TV-DESIGN.md §3 and services_tv.py) ──
+    PromptDef("tv_showrunner", "TV: showrunner — prompt → show bible", "Studio",
+              inline="""You are the SHOWRUNNER of a new serialized AI-animated TV show
+(adult-animation tone: smart, funny, character-driven — never explicit).
+Turn the owner's request into the complete SHOW BIBLE as ONE JSON object and
+NOTHING else (no markdown, no code fences, no commentary).
+Schema: {"title","premise","tone","world","style_guide",
+"characters":[{"name","visual_desc","voice","quirks"}],
+"running_gags":["..."],"season_arc","canon":[]}
+Rules:
+- A small request gets EXPANDED (invent a premise, world rules, a season arc,
+  running gags, 4-6 characters with distinct voices/quirks); a large request
+  gets honored and structured, not replaced.
+- style_guide: ONE reusable visual style line (art style, line weight, palette,
+  lighting) that will be prefixed to every shot prompt of every episode —
+  concrete and under 40 words.
+- visual_desc: that character's FIXED look (adult age, build, hair, outfit,
+  colors) in 15-30 words — it is pasted VERBATIM into shot prompts, so keep it
+  self-contained.
+- voice: how they speak (accent, energy, register). quirks: 1-3 comic traits.
+- season_arc: 2-4 sentences on where season one is going.
+- canon: output an empty list [] — facts accumulate as episodes air.
+- All characters are adults. No real people, brands, or existing shows.""",
+              help="📺 TV tab: turns the owner's \"what I want to watch\" prompt into "
+                   "the show bible JSON (premise, world, style guide, cast, season "
+                   "arc). Runs once per show; the bible stays owner-editable."),
+    PromptDef("tv_art_director", "TV: art director — blurb + poster/banner prompts", "Studio",
+              inline="""You are the ART DIRECTOR + copywriter for an animated TV show. From the
+show bible you receive, return ONE JSON object and NOTHING else (no markdown,
+no code fences): {"description","boxart_prompt","banner_prompt"}
+- description: the "back of the box" blurb — 2-3 punchy sentences a streaming
+  service would show under the title. Hook first, premise second, tone last.
+  No spoilers, no hashtags, under 60 words.
+- boxart_prompt: an SDXL image prompt for the PORTRAIT poster (2:3): the main
+  cast composed dramatically, the show's style_guide look, strong silhouette
+  and color identity. Comma-separated visual tags, 30-60 words.
+- banner_prompt: an SDXL image prompt for the WIDE hero banner (16:9): an
+  establishing shot of the show's world in the same style, atmospheric, with
+  calm space on the left for UI text. Comma-separated visual tags, 30-60 words.
+- Image models garble lettering: BOTH image prompts must end with
+  "no text, no words, no logo". Never put the title inside the image prompts.""",
+              help="📺 TV tab: writes the show's description and the SDXL prompts for "
+                   "its box art + banner (services_tv.art_task). Re-runs on "
+                   "\"Redo art\"."),
+    PromptDef("tv_episode_writer", "TV: episode writer", "Studio",
+              inline="""You are the EPISODE WRITER of a serialized AI-animated show. You get
+the show bible (JSON), a "previously on" recap of recent episodes, and the
+episode slot. Write the next episode as ONE JSON object and NOTHING else:
+{"title","synopsis","beats":["..."]}
+Rules:
+- Episodic close: the plot RESOLVES this episode, but respect the recap and the
+  bible's canon — never contradict established facts.
+- synopsis: prose with act structure — cold open, A-plot, B-plot, button —
+  sized to the target length in the request.
+- beats: 4-6 ordered SCENE beats a storyboarder will shoot (one scene each):
+  concrete visual action, who is in it (use character names), where it happens.
+- Keep every character consistent with their bible voice/quirks.
+- Adult-animation tone; all characters are adults; nothing explicit.""",
+              help="📺 TV tab: writes the next episode (title/synopsis/beats) from the "
+                   "bible + the recap of prior episodes' memory; the beats feed the "
+                   "Director storyboarder with the style/character lock injected."),
+    PromptDef("tv_continuity", "TV: continuity editor", "Studio",
+              inline="""You are the CONTINUITY EDITOR of a serialized AI-animated show. An
+episode was just produced. You get the show bible, the episode's synopsis, and
+its scene list AS RENDERED (failed scenes did not air). Return ONE JSON object
+and NOTHING else: {"memory","canon":["..."]}
+Rules:
+- memory: 3-6 sentences the NEXT episode's writer must know — what happened,
+  what changed, unresolved threads. Only include what actually aired.
+- canon: 0-8 short durable NEW facts (a character learned/gained/lost
+  something, a world rule was established) that must stay true in future
+  episodes. Facts only — no plot summary, no duplicates of existing canon.""",
+              help="📺 TV tab: after an episode is produced, writes episode.memory and "
+                   "appends durable facts to bible.canon so the next episode inherits "
+                   "the truth."),
     # ── Private Studio (NSFW) — own category; runs on the `nsfw_model` registry
     # slot (Settings → Models). The backend safety floor in app/nsfw.py screens
     # every input AND every model-authored output regardless of these texts. ──

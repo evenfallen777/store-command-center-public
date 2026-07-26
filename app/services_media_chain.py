@@ -618,7 +618,8 @@ def _mux_chain_audio(video: str, music_wav: str, voice_wavs: list, sfx_wavs: lis
     subprocess.run(
         ["ffmpeg", "-y"] + inputs +
         ["-filter_complex", fc, "-map", "0:v", "-map", "[a]",
-         "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", out],
+         "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+         "-movflags", "+faststart", out],
         check=True, capture_output=True, timeout=300)
 
 

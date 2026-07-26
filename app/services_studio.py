@@ -9,13 +9,19 @@ Phase 2 (§3/§4/§8): the smallest end-to-end slice that actually PRODUCES a
 video. render_scene() turns a scene's shots into ONE video_chains row and runs
 it through the UNMODIFIED chain engine (run_chain_generation → orch.video_
 exclusive, per-shot lengths via the new frames_json column); render_project()
-renders scenes sequentially; render_audio() generates a music bed + ONE
-whole-script voiceover via the unmodified run_audio_clip (orch.video_acquire);
-assemble_project() stitches scene clips (_compile_chain_video) and mixes the
-audio on with the existing _mux_audio ffmpeg path → project.final_path.
+renders scenes sequentially; render_audio() generates the audio lanes via the
+unmodified run_audio_clip (orch.video_acquire); assemble_project() stitches
+scene clips (_compile_chain_video) and mixes the audio on → project.final_path.
 Every GPU touch rides the unified queue; assembly/mix is CPU-only ffmpeg.
-Phase 3 (deferred): per-scene VO adelay timeline, SFX cues, full amix +
-sidechain ducking, atempo reconciliation, burned captions, mid-chain uploads.
+Phase 3 (§4): the REAL layered timeline — render_audio() makes one TTS clip
+per scene-anchored voiceover cue and one foley clip per sfx cue;
+assemble_project() computes each scene's start from durations measured on
+disk (minus the 0.5 s xfade overlaps — _chain_timeline arithmetic), persists
+it to studio_cues.start_s and mixes every lane adelay-placed with amix
+normalize=0 + apad, atempo (≤1.3×) VO fitting and sidechain-ducked music.
+Projects with NO per-scene voiceover cues keep the Phase-2 whole-script
+single read (vo_clip_id) and behave exactly as before.
+Still deferred: burned captions, mid-chain uploads.
 """
 import json
 import logging
@@ -387,7 +393,7 @@ def submit_storyboard(project_id: int, notes: str = "") -> int:
 #                   nested video_acquire per segment, auto-xfade-compile)
 #   audio         → run_audio_clip (audio_clips lifecycle, _VIDEO_RUN_LOCK +
 #                   orch.video_acquire per clip)
-#   stitch/mix    → _compile_chain_video + _mux_audio (CPU-only ffmpeg, no GPU)
+#   stitch/mix    → _compile_chain_video + _mux_studio_audio (CPU ffmpeg, no GPU)
 # These functions BLOCK and are meant to run as FastAPI background tasks
 # (starlette runs sync background tasks in its threadpool).
 
@@ -406,6 +412,15 @@ def _upd_scene(scene_id: int, **fields):
     sets = ",".join(f"{k}=?" for k in fields)
     conn.execute(f"UPDATE studio_scenes SET {sets},updated_at=datetime('now') WHERE id=?",
                  (*fields.values(), scene_id))
+    conn.commit()
+    conn.close()
+
+
+def _upd_cue(cue_id: int, **fields):
+    conn = get_conn()
+    sets = ",".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE studio_cues SET {sets},updated_at=datetime('now') WHERE id=?",
+                 (*fields.values(), cue_id))
     conn.commit()
     conn.close()
 
@@ -634,11 +649,15 @@ def _project_video_seconds(scenes: list[dict]) -> float:
 
 
 def render_audio(project_id: int):
-    """Phase-2 audio (design §8 Phase 2): ONE music bed from the project's music
-    cue + ONE voiceover clip of the whole script (TTS), both as audio_clips rows
-    run through the UNMODIFIED run_audio_clip (unified queue, sequential).
-    Per-scene VO timeline / SFX cues / ducking = Phase 3."""
-    from services_media_audio import run_audio_clip
+    """Phase-3 layered audio (design §4.1): the music bed as before, plus the
+    real timeline lanes — one TTS clip per scene-anchored 'voiceover' cue and
+    one foley clip per 'sfx' cue (music engine), each an audio_clips row run
+    through the UNMODIFIED run_audio_clip (unified queue, sequential).
+    Fallback: a project with NO per-scene voiceover cues keeps the Phase-2
+    shape — ONE whole-script read stored on vo_clip_id — so old projects
+    behave exactly as before. Timeline placement happens at assemble time
+    (start_s comes from durations measured on disk, never est numbers)."""
+    from services_media_audio import run_audio_clip, _video_duration
     conn = get_conn()
     proj = conn.execute("SELECT * FROM studio_projects WHERE id=?", (project_id,)).fetchone()
     if not proj:
@@ -649,8 +668,14 @@ def render_audio(project_id: int):
     music_cue = conn.execute(
         "SELECT * FROM studio_cues WHERE project_id=? AND kind='music' ORDER BY id LIMIT 1",
         (project_id,)).fetchone()
+    # scene-anchored lanes in scene order (music cues have scene_id NULL)
     vo_cues = conn.execute(
-        "SELECT * FROM studio_cues WHERE project_id=? AND kind='voiceover' ORDER BY id",
+        "SELECT c.* FROM studio_cues c JOIN studio_scenes s ON s.id=c.scene_id "
+        "WHERE c.project_id=? AND c.kind='voiceover' ORDER BY s.idx, c.id",
+        (project_id,)).fetchall()
+    sfx_cues = conn.execute(
+        "SELECT c.* FROM studio_cues c JOIN studio_scenes s ON s.id=c.scene_id "
+        "WHERE c.project_id=? AND c.kind='sfx' ORDER BY s.idx, c.id",
         (project_id,)).fetchall()
     conn.close()
     if not scenes or any(sc["status"] != "done" or not sc["scene_path"] for sc in scenes):
@@ -699,26 +724,61 @@ def render_audio(project_id: int):
         if cid:
             _upd_project(project_id, music_clip_id=cid)
 
-    script = (proj["script"] or "").strip()
-    if script:
-        _upd_project(project_id, progress_msg="Recording narration…")
-        # Phase-2 simple shape: ONE whole-script read from t=0, tagged onto the
-        # FIRST voiceover cue (single-scene: they are literally the same; multi-
-        # scene: the tag keeps the clip out of the normal Audio gallery — the
-        # true per-scene VO timeline is Phase 3).
-        cue_id = vo_cues[0]["id"] if vo_cues else None
-        cid = _make_clip("voice", proj["voice_engine"] or "mms_tts", script, 8, cue_id)
+    made_lane = False
+    if vo_cues:
+        # Phase-3 shape: one clip per scene's voiceover cue, placed at its
+        # scene's measured start at assemble time. The Phase-2 whole-script
+        # clip id is cleared so the mixer prefers the per-scene lanes.
+        _upd_project(project_id, vo_clip_id=None)
+        for n, cue in enumerate(vo_cues, 1):
+            text = (cue["text"] or "").strip()
+            if not text:
+                continue
+            _upd_project(project_id,
+                         progress_msg=f"Recording narration {n}/{len(vo_cues)}…")
+            cid = _make_clip("voice", cue["engine"] or proj["voice_engine"] or "mms_tts",
+                             text, 8, cue["id"])
+            if cid:
+                made_lane = True
+                w = _clip_wav(cid)   # measure the spoken length for reconciliation
+                if w:
+                    _upd_cue(cue["id"], duration_s=round(_video_duration(w), 3))
+    else:
+        script = (proj["script"] or "").strip()
+        if script:
+            _upd_project(project_id, progress_msg="Recording narration…")
+            # Phase-2 fallback: ONE whole-script read from t=0 — projects
+            # storyboarded without per-scene VO cues behave exactly as before.
+            cid = _make_clip("voice", proj["voice_engine"] or "mms_tts", script, 8, None)
+            if cid:
+                _upd_project(project_id, vo_clip_id=cid)
+                made_lane = True
+
+    for n, cue in enumerate(sfx_cues, 1):
+        fx = (cue["text"] or "").strip()[:200]
+        if not fx:
+            continue
+        if "no music" not in fx.lower():   # keep MusicGen from scoring the foley
+            fx += ", foley, no music, no melody"
+        _upd_project(project_id,
+                     progress_msg=f"Creating sound effect {n}/{len(sfx_cues)}…")
+        try:
+            dur = int(min(max(float(cue["duration_s"] or 3), 2), 8))
+        except (TypeError, ValueError):
+            dur = 3
+        cid = _make_clip("music", cue["engine"] or proj["music_engine"] or "musicgen",
+                         fx, dur, cue["id"])
         if cid:
-            _upd_project(project_id, vo_clip_id=cid)
+            made_lane = True
 
     conn = get_conn()
-    proj2 = conn.execute("SELECT music_clip_id,vo_clip_id FROM studio_projects WHERE id=?",
+    proj2 = conn.execute("SELECT music_clip_id FROM studio_projects WHERE id=?",
                          (project_id,)).fetchone()
     conn.close()
-    if not proj2["music_clip_id"] and not proj2["vo_clip_id"]:
+    if not proj2["music_clip_id"] and not made_lane:
         _upd_project(project_id, status="failed", progress_msg=None,
                      error=("Audio failed — " + "; ".join(errors))[:500] if errors
-                     else "No music cue and no script — nothing to generate")
+                     else "No music cue, no voiceover, no sfx — nothing to generate")
         return
     msg = "Audio ready — assemble & mix"
     if errors:
@@ -750,27 +810,81 @@ def _stream_types(path: str) -> set[str]:
         return set()
 
 
-def _mux_voice_only(video: str, voice: str, out: str):
-    """Voiceover with no music bed — same shape as _mux_audio (video is the
-    master clock, -t clamps, -c:v copy) minus the looped bed input."""
+def _mux_studio_audio(video: str, music: str, music_gain: float,
+                      vo_lanes: list, sfx_lanes: list, out: str):
+    """Mix the project's audio lanes onto the assembled video — the
+    _mux_chain_audio shape (video is the master clock, -t clamps, -c:v copy)
+    plus the Phase-3 niceties (design §4.3): looped music bed at its cue gain,
+    each VO lane atempo-fitted (≤1.3×) then adelay-placed at its scene start,
+    each SFX lane adelay-placed at scene start + offset, amix normalize=0 so
+    the authored gains hold, apad so audio can never end before the video —
+    and whenever music AND voice both exist the bed is sidechain-ducked under
+    the summed VO, so music dips when characters speak.
+    vo_lanes: (start_s, gain, wav, tempo) · sfx_lanes: (start_s, gain, wav)."""
     from services_media_audio import _video_duration
     dur = _video_duration(video) or 5.0
+    inputs = ["-i", video]
+    parts, idx = [], 1
+    if music:
+        inputs += ["-stream_loop", "-1", "-i", music]
+        parts.append(f"[{idx}:a]volume={float(music_gain):.3f}[bg]")
+        idx += 1
+    vo_labels = []
+    for n, (off, gain, w, tempo) in enumerate(vo_lanes):
+        inputs += ["-i", w]
+        ms = max(0, int(round(float(off) * 1000)))
+        fit = f"atempo={tempo:.4f}," if tempo and tempo > 1.001 else ""
+        parts.append(f"[{idx}:a]{fit}adelay={ms}:all=1,volume={float(gain):.3f}[vo{n}]")
+        vo_labels.append(f"[vo{n}]")
+        idx += 1
+    fx_labels = []
+    for n, (off, gain, w) in enumerate(sfx_lanes):
+        inputs += ["-i", w]
+        ms = max(0, int(round(float(off) * 1000)))
+        parts.append(f"[{idx}:a]adelay={ms}:all=1,volume={float(gain):.3f}[fx{n}]")
+        fx_labels.append(f"[fx{n}]")
+        idx += 1
+    if not music and not vo_labels and not fx_labels:
+        raise ValueError("no audio layers to mix")
+    if music and vo_labels:
+        # Ducking: sum the VO lanes ONCE, split into a mix copy + a sidechain
+        # key (a filtergraph label can't be consumed twice — the asplit the
+        # design sketch omits), apad the key so the compressor never starves
+        # before the looped bed ends, then duck the bed under it.
+        summed = ("".join(vo_labels) +
+                  f"amix=inputs={len(vo_labels)}:duration=longest:normalize=0,"
+                  if len(vo_labels) > 1 else vo_labels[0])
+        parts.append(f"{summed}asplit=2[vosum][vokey]")
+        parts.append("[vokey]apad[vokeyp]")
+        parts.append("[bg][vokeyp]sidechaincompress=threshold=0.03:ratio=8:"
+                     "attack=50:release=400[bgduck]")
+        mix = ["[bgduck]", "[vosum]"] + fx_labels
+    else:
+        mix = (["[bg]"] if music else []) + vo_labels + fx_labels
+    tail = ("".join(mix) + f"amix=inputs={len(mix)}:duration=longest:normalize=0,apad[a]"
+            if len(mix) > 1 else f"{mix[0]}apad[a]")
+    fc = ";".join(parts + [tail])
     subprocess.run(
-        ["ffmpeg", "-y", "-i", video, "-i", voice,
-         "-filter_complex", "[1:a]volume=1.0,apad[a]", "-map", "0:v", "-map", "[a]",
-         "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", out],
-        check=True, capture_output=True, timeout=180)
+        ["ffmpeg", "-y"] + inputs +
+        ["-filter_complex", fc, "-map", "0:v", "-map", "[a]",
+         "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+         "-movflags", "+faststart", out],
+        check=True, capture_output=True, timeout=300)
 
 
 def assemble_project(project_id: int):
     """Stitch the scene clips into the full video and mix the generated audio on
-    (design §3.2 + Phase-2 simple mix). CPU-only ffmpeg — no GPU acquire, same
-    policy as the chain auto-compile. Single scene → the scene clip is copied
-    (that IS what _compile_chain_video does for one input); multi-scene → xfade
-    stitch with concat fallback. Sets video_path, then final_path (with audio)."""
+    (design §3.2 + §4.2/§4.3 layered timeline). CPU-only ffmpeg — no GPU
+    acquire, same policy as the chain auto-compile. Single scene → the scene
+    clip is copied (that IS what _compile_chain_video does for one input);
+    multi-scene → xfade stitch with concat fallback. Each scene's REAL start on
+    the assembled timeline (measured durations minus the 0.5 s xfade overlaps,
+    _chain_timeline arithmetic) is computed here, persisted to
+    studio_cues.start_s, and drives the adelay placement of every VO/SFX lane.
+    Sets video_path, then final_path (with audio)."""
     from config import VIDEOS_DIR
     from services_media_chain import _compile_chain_video
-    from services_media_audio import _mux_audio, _video_duration
+    from services_media_audio import _video_duration
     conn = get_conn()
     proj = conn.execute("SELECT * FROM studio_projects WHERE id=?", (project_id,)).fetchone()
     scenes = [dict(r) for r in conn.execute(
@@ -807,14 +921,89 @@ def assemble_project(project_id: int):
     _upd_project(project_id, video_path=full, progress_msg="Mixing audio…",
                  status="mixing")
 
+    # ── real timeline: measured scene starts (design §3.2/§4.2) — the exact
+    # cumulative-durations-minus-0.5s-overlap arithmetic of _chain_timeline.
+    # Durations are re-probed from disk (facts), never est/DB numbers.
+    starts, sdurs, t = {}, {}, 0.0
+    for i, sc in enumerate(scenes):
+        d = _video_duration(sc["scene_path"]) or float(sc["duration_s"] or 3.0)
+        off = max(0.0, t - (0.5 if i else 0.0))
+        starts[sc["id"]], sdurs[sc["id"]] = off, d
+        t = off + d
+    # xfade vs concat-fallback drift (design §9.6): the stitch on disk is the
+    # truth — scale the computed starts onto the ACTUAL assembled length.
+    if t > 0 and abs(full_dur - t) > 0.25:
+        k = full_dur / t
+        starts = {sid: off * k for sid, off in starts.items()}
+        sdurs = {sid: d * k for sid, d in sdurs.items()}
+
+    # collect the cue lanes + persist each cue's absolute start_s
+    conn = get_conn()
+    cues = [dict(r) for r in conn.execute(
+        "SELECT c.*, s.idx AS scene_idx, a.status AS clip_status, a.audio_path "
+        "FROM studio_cues c LEFT JOIN studio_scenes s ON s.id=c.scene_id "
+        "LEFT JOIN audio_clips a ON a.id=c.clip_id "
+        "WHERE c.project_id=? ORDER BY s.idx, c.id", (project_id,))]
+    for c in cues:
+        if c["kind"] == "music":
+            st = 0.0
+        elif c["scene_id"] in starts:
+            st = starts[c["scene_id"]] + \
+                (float(c["offset_s"] or 0) if c["kind"] == "sfx" else 0.0)
+        else:
+            continue
+        conn.execute("UPDATE studio_cues SET start_s=?,updated_at=datetime('now') "
+                     "WHERE id=?", (round(st, 3), c["id"]))
+    conn.commit()
+    conn.close()
+
+    def _lane_wav(c) -> str:
+        p = c["audio_path"] or ""
+        return p if c["clip_status"] == "done" and p and Path(p).exists() else ""
+
+    warnings: list[str] = []
     music = _clip_wav(proj["music_clip_id"])
+    music_gain = next((float(c["gain"] or 0.25) for c in cues if c["kind"] == "music"), 0.25)
+    vo_lanes, sfx_lanes = [], []
     voice = _clip_wav(proj["vo_clip_id"])
+    if voice:
+        # Phase-2 shape: ONE whole-script read from t=0, no atempo (as before)
+        vo_lanes.append((0.0, 1.0, voice, 1.0))
+    else:
+        for c in cues:
+            if c["kind"] != "voiceover" or c["scene_id"] not in starts:
+                continue
+            w = _lane_wav(c)
+            if not w:
+                continue
+            # duration reconciliation (design §4.4): speed a long VO up toward
+            # its scene, capped at 1.3× — never fail the mix over pacing
+            vd, sd = _video_duration(w), sdurs[c["scene_id"]]
+            tempo = 1.0
+            if sd > 0 and vd > sd + 0.05:
+                tempo = min(vd / sd, 1.3)
+                if vd / tempo > sd + 0.05:
+                    warnings.append(f"scene {(c['scene_idx'] or 0) + 1} VO runs "
+                                    f"{vd / tempo - sd:.1f}s over its scene")
+            vo_lanes.append((starts[c["scene_id"]], float(c["gain"] or 1.0), w,
+                             round(tempo, 4)))
+    for c in cues:
+        if c["kind"] != "sfx" or c["scene_id"] not in starts:
+            continue
+        w = _lane_wav(c)
+        if not w:
+            continue
+        st = starts[c["scene_id"]] + float(c["offset_s"] or 0)
+        if st >= full_dur - 0.05:   # edited timings can push a cue past the end
+            warnings.append(f"sfx at {st:.1f}s is past the video end — dropped")
+            continue
+        sfx_lanes.append((st, float(c["gain"] or 0.9), w))
+
     final = str(VIDEOS_DIR / f"studio_{project_id}_final.mp4")
+    have_lanes = bool(music or vo_lanes or sfx_lanes)
     try:
-        if music:
-            _mux_audio(full, music, voice, final)     # looped bed + optional VO, -t clamps
-        elif voice:
-            _mux_voice_only(full, voice, final)
+        if have_lanes:
+            _mux_studio_audio(full, music, music_gain, vo_lanes, sfx_lanes, final)
         else:
             shutil.copy2(full, final)                  # silent final (no audio generated)
         # Hard verification — never mark 'done' on a hollow file. This is what
@@ -824,13 +1013,18 @@ def assemble_project(project_id: int):
         if not Path(final).exists() or Path(final).stat().st_size < 1024 \
                 or "video" not in kinds or _video_duration(final) <= 0:
             raise RuntimeError("mix produced an empty/broken final mp4")
-        if (music or voice) and "audio" not in kinds:
+        if have_lanes and "audio" not in kinds:
             raise RuntimeError("mix produced a final with NO audio stream")
-        note = "Final video ready" if (music or voice) else \
+        note = "Final video ready" if have_lanes else \
                "Final video ready (SILENT — generate audio, then assemble again)"
+        if warnings:
+            note += " · " + "; ".join(warnings)[:200]
         _upd_project(project_id, final_path=final, status="done", progress_msg=note)
-        logger.info("Studio project %d assembled → %s (%.1fs, streams=%s)",
-                    project_id, final, _video_duration(final), ",".join(sorted(kinds)))
+        logger.info("Studio project %d assembled → %s (%.1fs, streams=%s, "
+                    "vo=%d sfx=%d duck=%s)",
+                    project_id, final, _video_duration(final),
+                    ",".join(sorted(kinds)), len(vo_lanes), len(sfx_lanes),
+                    bool(music and vo_lanes))
     except subprocess.CalledProcessError as ex:
         Path(final).unlink(missing_ok=True)   # no 0-byte/partial final left on disk
         tail = (ex.stderr[-300:].decode("utf-8", "ignore") if isinstance(ex.stderr, bytes)
@@ -879,7 +1073,7 @@ def _burn_caption(video: str, text: str, out: str):
     """Burn the meme caption onto a finished video: bold white DejaVu with a
     black border, top-center (the classic meme block). textfile= (not text=)
     sidesteps every ffmpeg filter-escaping game; the audio stream is COPIED
-    untouched so the mixed bed/VO from _mux_audio survives bit-for-bit."""
+    untouched so the mixed bed/VO from _mux_studio_audio survives bit-for-bit."""
     import tempfile
     font = _meme_font()
     wrapped = _wrap_caption(text)
@@ -1017,17 +1211,31 @@ def _project_status(project_id: int) -> str:
     return r["status"] if r else "missing"
 
 
-def _has_audio_plan(project_id: int) -> bool:
-    """True when there is anything to generate audio FROM: a music cue or a
-    non-empty script (voiceover)."""
+def _cue_clips_ready(project_id: int) -> bool:
+    """True when any scene-anchored cue already has a playable generated clip —
+    the Phase-3 lanes live on studio_cues.clip_id, not the project-level
+    music_clip_id/vo_clip_id columns (which only cover the Phase-2 shapes)."""
     conn = get_conn()
-    has_music = conn.execute(
-        "SELECT 1 FROM studio_cues WHERE project_id=? AND kind='music' LIMIT 1",
+    rows = conn.execute(
+        "SELECT a.audio_path FROM studio_cues c JOIN audio_clips a ON a.id=c.clip_id "
+        "WHERE c.project_id=? AND c.scene_id IS NOT NULL AND a.status='done'",
+        (project_id,)).fetchall()
+    conn.close()
+    return any(r["audio_path"] and Path(r["audio_path"]).exists() for r in rows)
+
+
+def _has_audio_plan(project_id: int) -> bool:
+    """True when there is anything to generate audio FROM: a music cue, a
+    scene-anchored voiceover/sfx cue, or a non-empty script (voiceover)."""
+    conn = get_conn()
+    has_cue = conn.execute(
+        "SELECT 1 FROM studio_cues WHERE project_id=? AND (kind='music' OR "
+        "(kind IN ('voiceover','sfx') AND scene_id IS NOT NULL)) LIMIT 1",
         (project_id,)).fetchone()
     proj = conn.execute("SELECT script FROM studio_projects WHERE id=?",
                         (project_id,)).fetchone()
     conn.close()
-    return bool(has_music) or bool(proj and (proj["script"] or "").strip())
+    return bool(has_cue) or bool(proj and (proj["script"] or "").strip())
 
 
 def produce_project(project_id: int):
@@ -1048,7 +1256,8 @@ def produce_project(project_id: int):
                                 "WHERE id=?", (project_id,)).fetchone()
             conn.close()
             have_audio = bool(_clip_wav(proj["music_clip_id"]) or
-                              _clip_wav(proj["vo_clip_id"]))
+                              _clip_wav(proj["vo_clip_id"]) or
+                              _cue_clips_ready(project_id))
             if not have_audio and _has_audio_plan(project_id):
                 render_audio(project_id)
                 if _project_status(project_id) != "draft":

@@ -26,8 +26,8 @@ from routers import (
     research, nsfw as nsfw_router, systems as systems_router,
     health as health_router, pnl as pnl_router, games as games_router, donate,
     integrations as integrations_router, cloudflare as cloudflare_router,
-    studio as studio_router,
-    knowledge, livedocs, brands,
+    studio as studio_router, tv as tv_router,
+    knowledge, livedocs, brands, voice,
 )
 from routers import prompts as prompts_router   # /api/prompts — the prompt editor
 import docextract as docextract_router   # /api/extract — reusable photo->fields primitive
@@ -219,7 +219,7 @@ for _mod in (auth, dashboard, proposals, designs, generate, tasks, models,
              cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher_router, prompts_router,
              research, nsfw_router, systems_router, health_router, pnl_router,
              games_router, donate, integrations_router, cloudflare_router,
-             studio_router, docextract_router, knowledge, livedocs, brands):
+             studio_router, tv_router, docextract_router, knowledge, livedocs, brands, voice):
     app.include_router(_mod.router)
 
 # ─── PLUGINS (drop-in, auto-discovered) ──────────────────────────────────────

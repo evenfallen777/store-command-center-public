@@ -332,6 +332,69 @@ def create_studio_tables(conn):
     conn.commit()
 
 
+def create_tv_tables(conn):
+    """📺 TV layer — shows/episodes ON TOP of the Director studio (docs/TV-DESIGN.md §2).
+
+    An episode IS a studio_projects row (project_id fk): storyboard, scenes,
+    shots, cues and the whole render pipeline are reused wholesale. These tables
+    add only what a single project can't hold: the show bible (JSON: premise/
+    tone/world/style_guide/characters/running_gags/season_arc/canon — canon
+    GROWS as episodes air), episode-to-episode continuity (recap IN / memory
+    OUT), and the show's render settings copied to every episode's project.
+
+    Called from routers/tv.py at import (same one-time-ensure pattern as
+    create_bills_tables / create_ledger_tables), so db.py needs no wiring."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS tv_shows (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        title          TEXT,                   -- invented by the showrunner; owner-editable
+        prompt         TEXT NOT NULL,          -- the owner's original "what I want to watch"
+        bible          TEXT,                   -- JSON show bible (§3); owner-editable anytime
+        style          TEXT,                   -- e.g. "2D adult animation, thick outlines"
+        format_seconds INTEGER DEFAULT 150,    -- target episode length (the ladder rung)
+        -- render settings, decided once, copied to every episode's project (consistency)
+        model_id       TEXT DEFAULT 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
+        width          INTEGER DEFAULT 480,
+        height         INTEGER DEFAULT 832,
+        fps            INTEGER DEFAULT 16,
+        steps          INTEGER DEFAULT 20,
+        status         TEXT DEFAULT 'new',     -- new | bible (showrunner writing) | ready | failed
+        error          TEXT,
+        nsfw           INTEGER DEFAULT 0,      -- mature lane rides the EXISTING nsfw gates
+        -- show art (art-director LLM → SDXL poster/banner; services_tv.art_task)
+        description    TEXT,                   -- 2-3 sentence "back of the box" blurb
+        boxart_path    TEXT,                   -- portrait poster png (served via /designs)
+        banner_path    TEXT,                   -- wide hero banner png
+        art_status     TEXT,                   -- NULL | queued | generating | done | failed
+        art_error      TEXT,
+        created_at     TEXT DEFAULT (datetime('now')),
+        updated_at     TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS tv_episodes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        show_id     INTEGER NOT NULL,
+        season      INTEGER DEFAULT 1,
+        number      INTEGER DEFAULT 1,
+        title       TEXT,
+        synopsis    TEXT,                      -- episode-writer output (act structure prose)
+        recap       TEXT,                      -- "previously on" IN: what the writer was told
+        memory      TEXT,                      -- OUT: post-render canon summary (feeds next ep)
+        project_id  INTEGER,                   -- fk → studio_projects (the whole render pipeline)
+        status      TEXT DEFAULT 'draft',      -- draft | writing | ready | producing | done | failed
+        final_path  TEXT,                      -- copy of the project's final for the TV player
+        error       TEXT,
+        created_at  TEXT DEFAULT (datetime('now')),
+        updated_at  TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY(show_id)    REFERENCES tv_shows(id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tv_episodes_show ON tv_episodes(show_id, season, number);
+    """)
+    conn.commit()
+
+
 def create_resell_tables(conn):
     conn.cursor().executescript("""
     CREATE TABLE IF NOT EXISTS resell_listings (
@@ -1172,6 +1235,18 @@ def run_migrations(conn):
         "ALTER TABLE video_chains ADD COLUMN audio_error TEXT",
         "ALTER TABLE video_chains ADD COLUMN final_path TEXT",      # compiled video WITH the mixed audio
         "ALTER TABLE audio_clips ADD COLUMN chain_id INTEGER",      # fk → video_chains.id (keeps chain layers out of the Audio gallery)
+        # Single-video "Generate with audio" parity with chains: the same
+        # layers/volumes/engines JSON (DEFAULT_CHAIN_AUDIO keys) saved per
+        # video so add-audio / redo-sound reuse what the owner picked.
+        "ALTER TABLE videos ADD COLUMN audio_settings TEXT",
+        # TV show art (boxart/banner/description overhaul) — columns also live
+        # in create_tv_tables' CREATE for fresh installs; these cover DBs that
+        # created tv_shows before the art feature landed.
+        "ALTER TABLE tv_shows ADD COLUMN description TEXT",
+        "ALTER TABLE tv_shows ADD COLUMN boxart_path TEXT",
+        "ALTER TABLE tv_shows ADD COLUMN banner_path TEXT",
+        "ALTER TABLE tv_shows ADD COLUMN art_status TEXT",
+        "ALTER TABLE tv_shows ADD COLUMN art_error TEXT",
         # Proposal review gate: an LLM judge rates each pending proposal so the
         # good ones surface and the weeds get gated out (see proposal_gate.py).
         # Existing rows keep NULLs = "not yet reviewed"; no backfill needed.

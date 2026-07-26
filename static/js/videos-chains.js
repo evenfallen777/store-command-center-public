@@ -297,15 +297,21 @@ async function refreshChainGallery() {
   if (_chainPollTimer) { clearTimeout(_chainPollTimer); _chainPollTimer = null; }
   let chains = [];
   try { chains = await api('/api/video-chains'); } catch { return; }
-  if (!chains.length) { el.innerHTML = ''; return; }
+  if (!chains.length) { stopMediaIn(el); el.innerHTML = ''; return; }
   const hasActive = chains.some(c => ['pending','generating'].includes(c.status)
     || ['queued','generating'].includes(c.audio_status));
-  // setHTMLKeepMedia (tab-videos.js): keep per-player mute/volume/position
-  // across the poll re-render and never leak a detached player's audio.
-  setHTMLKeepMedia(el, `
-    <div style="font-size:1rem;font-weight:700;margin:24px 0 12px">&#128279; Video Chains</div>
-    <div style="display:flex;flex-direction:column;gap:16px">${chains.map(chainCard).join('')}</div>
-  `);
+  // syncCards (tab-videos.js): the poll only re-renders chain cards whose
+  // data changed — an unchanged playing compiled video is never rebuilt
+  // (no flicker, no interrupted loads).
+  let list = el.querySelector('[data-cards="chains"]');
+  if (!list) {
+    stopMediaIn(el);
+    el.innerHTML = `
+      <div style="font-size:1rem;font-weight:700;margin:24px 0 12px">&#128279; Video Chains</div>
+      <div data-cards="chains" style="display:flex;flex-direction:column;gap:16px"></div>`;
+    list = el.querySelector('[data-cards="chains"]');
+  }
+  syncCards(list, chains, chainCard);
   if (hasActive) _chainPollTimer = setTimeout(refreshChainGallery, 2500);
 }
 
@@ -339,8 +345,8 @@ function chainCard(c) {
   const compiledPlayer   = compiledSrc ? `
     <div style="margin-top:12px">
       <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">&#127902; Compiled video:${hasSound ? ' <span style="color:#22c55e">&#128266; with sound</span>' : ''}</div>
-      <video controls loop preload="metadata" style="width:100%;border-radius:8px;background:#000;max-height:200px;display:block">
-        <source src="${compiledSrc}" type="video/mp4">
+      <video controls loop preload="metadata" style="width:auto;max-width:min(480px,100%);border-radius:8px;background:#000;max-height:220px;display:block">
+        <source src="${compiledSrc}" type="video/mp4" onerror="_srcRetry(this)">
       </video>
       <a href="${compiledSrc}" download style="text-decoration:none">
         <button style="margin-top:6px;width:auto;padding:5px 12px;font-size:.8rem;background:var(--accent2,#0ea5e9)">&#11015; Download Compiled</button>

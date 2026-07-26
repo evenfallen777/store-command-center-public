@@ -156,6 +156,10 @@ async function gamesLoadEngines(refresh) {
               color:${ok ? '#fff' : 'var(--muted)'};border:1px solid ${ok ? 'var(--green)' : 'var(--border)'};">
               ${ok ? 'installed' : 'not installed'}</span>
             ${e.version ? `<span style="font-size:.7rem;color:var(--accent2);">v${esc(e.version)}</span>` : ''}
+            ${(e.versions || []).length > 1
+              ? `<span title="${esc((e.versions || []).join(', '))}"
+                   style="font-size:.62rem;padding:1px 7px;border-radius:20px;border:1px solid var(--border);
+                   color:var(--muted);">+${(e.versions || []).length - 1} more</span>` : ''}
           </div>
           <div style="font-size:.72rem;color:var(--muted);margin-top:4px;">${esc(e.note || '')}</div>
           ${ok ? `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
@@ -254,6 +258,9 @@ async function gamesLoadProjects(refresh) {
               : `<span style="font-size:.68rem;color:var(--muted);">${p.engine === 'godot'
                   ? 'engine missing' : 'builds are Godot-only for now'}</span>`}
             <button class="btn-sm" onclick="gamesSub('assets')">&#127912; Assets</button>
+            ${p.engine === 'unity' ? `<button class="btn-sm"
+              title="Adds the MCP for Unity git package to this project's Packages/manifest.json. Takes a timestamped backup first and is reversible."
+              onclick="gamesUnityMcp('${esc(p.path)}','install')">&#128279; Add MCP</button>` : ''}
             <button class="btn-sm" onclick="gamesPublishOpen('${esc(p.path)}','${esc(p.name)}','${esc(p.engine)}')"
               >&#128717;&#65039; ${dr ? 'Edit listing' : 'Publish to shop'}</button>
           </div>
@@ -511,19 +518,126 @@ async function gamesLoadMcp() {
       ${o.install ? `<div style="font-size:.66rem;color:var(--muted);margin-top:6px;">
         <code>${esc(o.install)}</code></div>` : ''}`);
   }).join('');
+  // Live bridge state for the configured Unreal project (never fatal — a bridge
+  // that isn't up is a normal state, not an error).
+  let br = null;
+  try { br = await api('/api/games/mcp/bridge'); } catch (e) { br = { error: String(e.message || e) }; }
+  _gamesData.mcp = d;
+
+  const g = d.guard || {};
+  const coop = g.editor_mode ? (g.editor_active
+    ? { c: 'var(--green)', t: 'co-op ACTIVE — editor up, queue still running' }
+    : { c: 'var(--muted)', t: 'co-op armed — no editor detected' })
+    : { c: 'var(--warn)', t: 'co-op OFF — an editor will PAUSE the queue' };
+
+  const bs = br && br.running
+    ? { c: 'var(--green)', t: `connected on port ${br.port}` }
+    : { c: br && br.port ? 'var(--warn)' : 'var(--muted)',
+        t: (br && br.error) ? br.error : 'not running' };
+
   el.innerHTML = `
+    ${_gPanel(`
+      <div style="font-weight:600;font-size:.85rem;margin-bottom:6px;">&#128279; Live editor bridge</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+        <span style="font-size:.64rem;padding:2px 8px;border-radius:20px;border:1px solid ${bs.c};
+          color:${bs.c};">${esc(bs.t)}</span>
+        <span style="font-size:.64rem;padding:2px 8px;border-radius:20px;border:1px solid ${coop.c};
+          color:${coop.c};">${esc(coop.t)}</span>
+        <button class="btn-sm" style="margin-left:auto;" onclick="gamesMcpTest()">Test connection</button>
+      </div>
+      <div style="font-size:.72rem;color:var(--muted);line-height:1.6;">
+        The bridge port is <b>derived per project</b> and published to
+        <code>Saved/UE_MCP_Bridge/port.json</code> &mdash; it is not the 9877 the ue-mcp
+        client assumes, so the Store reads that file instead. Calls placed here ride the
+        <b>unified queue</b>, so editor work serialises with everything else rather than
+        racing it for the GPU.
+      </div>
+      <div style="margin-top:10px;display:grid;grid-template-columns:110px 1fr;gap:6px 10px;align-items:center;">
+        <label style="font-size:.72rem;color:var(--muted);">Project</label>
+        <input id="mcp-project" value="${esc(d.mcp_project || '')}"
+          placeholder="/mnt/projects/unreal/Sandbox"
+          style="font-size:.72rem;padding:4px 7px;width:100%;box-sizing:border-box;">
+        <label style="font-size:.72rem;color:var(--muted);">Model</label>
+        <input id="mcp-model" value="${esc(d.mcp_model || '')}"
+          placeholder="(blank = orchestrator default)"
+          style="font-size:.72rem;padding:4px 7px;width:100%;box-sizing:border-box;">
+        <span></span>
+        <div style="font-size:.66rem;color:var(--muted);line-height:1.5;">
+          Used only when a call needs inference; a plain editor command loads no model at all.
+          Pick something that fits <b>beside</b> the editor &mdash; the 12B keep-warm default
+          does not, next to Unreal, on a 12&nbsp;GB card. A <code>-cpu</code> build uses no VRAM.
+          <button class="btn-sm" style="margin-left:6px;" onclick="gamesMcpSave()">Save</button>
+        </div>
+      </div>
+      <div id="mcp-test-out" style="font-size:.7rem;color:var(--muted);margin-top:8px;"></div>`)}
     ${_gPanel(`
       <div style="font-weight:600;font-size:.85rem;margin-bottom:6px;">&#128161; What this pane is</div>
       <div style="font-size:.74rem;color:var(--muted);line-height:1.6;">
         An <b>editor MCP</b> lets an AI agent drive a running game editor directly &mdash; open scenes,
-        move nodes, run the project, read the error console. This pane only reports what exists;
-        it never installs, launches or connects anything. Pick one, follow its docs, then record it
-        in settings when you've opted in.
+        move nodes, run the project, read the error console. The catalog below never installs,
+        launches or connects anything &mdash; it reports what exists so you can opt in.
         ${d.store_mcp ? `<br><br>${esc(d.store_mcp)}` : ''}</div>`)}
     ${opts || `<div class="empty"><div class="empty-icon">&#128268;</div>
       <div style="font-size:.75rem;color:var(--muted);">No MCP options to report.</div></div>`}`;
 }
 window.gamesLoadMcp = gamesLoadMcp;
+
+/* Add / remove the Unity MCP package in ONE project. This rewrites that project's
+   Packages/manifest.json, so it is confirm-gated and never implicit — a backup is
+   taken on the node before every write and 'remove' undoes it. */
+async function gamesUnityMcp(path, action) {
+  const verb = action === 'remove' ? 'Remove' : 'Add';
+  if (!confirm(`${verb} the MCP for Unity package ${action === 'remove' ? 'from' : 'to'}:\n\n${path}\n\n`
+      + `This edits the project's Packages/manifest.json (a timestamped backup is taken first).`)) return;
+  try {
+    const r = await api('/api/games/mcp/unity', {
+      method: 'POST', body: JSON.stringify({ project: path, action }) });
+    toast?.(r.changed ? `${verb}d — ${r.next || ''}` : (r.note || 'no change needed'));
+    gamesLoadProjects(true);
+  } catch (e) {
+    toast?.(`Failed: ${String(e.message || e)}`, true);
+  }
+}
+window.gamesUnityMcp = gamesUnityMcp;
+
+async function gamesMcpSave() {
+  const model = (document.getElementById('mcp-model') || {}).value || '';
+  const project = (document.getElementById('mcp-project') || {}).value || '';
+  try {
+    const r = await api('/api/games/mcp/settings', {
+      method: 'POST', body: JSON.stringify({ model: model.trim(), project: project.trim() }) });
+    toast?.(`Saved — model: ${r.model_effective || 'default'}`);
+    gamesLoadMcp();
+  } catch (e) { toast?.(`Save failed: ${String(e.message || e)}`, true); }
+}
+window.gamesMcpSave = gamesMcpSave;
+
+/* Queue-routed smoke test: a read-only editor command with NO model, so it proves
+   the bridge answers without loading anything onto the GPU. */
+async function gamesMcpTest() {
+  const out = document.getElementById('mcp-test-out');
+  if (out) out.textContent = 'Queued…';
+  try {
+    const r = await api('/api/games/mcp/call', {
+      method: 'POST', body: JSON.stringify({ method: 'get_current_level' }) });
+    if (!r.task_id) { if (out) out.textContent = 'No task id returned.'; return; }
+    for (let i = 0; i < 20; i++) {
+      await new Promise(res => setTimeout(res, 1000));
+      let s;
+      try { s = await api(`/api/games/build/${r.task_id}`); } catch (e) { continue; }
+      if (s.status === 'done' || s.status === 'failed') {
+        if (out) out.textContent = (s.status === 'done' ? '✅ ' : '⚠️ ') + String(s.output || '').slice(0, 400);
+        gamesLoadMcp();
+        return;
+      }
+      if (out) out.textContent = `Running… (${s.status || 'queued'})`;
+    }
+    if (out) out.textContent = 'Timed out waiting for the queue.';
+  } catch (e) {
+    if (out) out.textContent = `Failed: ${String(e.message || e)}`;
+  }
+}
+window.gamesMcpTest = gamesMcpTest;
 
 /* ── DOCS + NOTES ────────────────────────────────────────────────────────── */
 

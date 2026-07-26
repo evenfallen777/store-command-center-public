@@ -61,5 +61,8 @@ designs/sizes/
 research_media/
 brands/
 
+# Voice (Jarvis) TTS/STT model binaries — large, downloaded on demand (see app/VOICE.md)
+app/voice_models/
+
 # Claude Code agent worktrees / local state
 .claude/

@@ -329,7 +329,12 @@ class Orchestrator:
                         or bool(self._video_hold_threads)
                         or self._llm_state in ("loading", "unloading"))
             can_borrow = bool(self._resident) and self._resident[0] == "llm"
-        if gpu_busy or not can_borrow:
+        # _video_hold_active covers the CHAIN-LONG exclusive hold too:
+        # between segments _video_hold_threads is empty while the chain still
+        # owns the VRAM, and _resident can be stale ("llm" that the chain
+        # already evicted) — borrowing then makes LM Studio JIT-RELOAD the
+        # model mid-chain and OOM the next segment's weight load.
+        if gpu_busy or self._video_hold_active() or not can_borrow:
             return None
         try:
             return work_fn()
@@ -946,20 +951,43 @@ class Orchestrator:
                 self._resident = ("llm", model)
             return True
         # `lms load` is SYNCHRONOUS (blocks until the model is ready). MULTI-MODEL
-        # eviction policy: CPU-placed instances (`@cpu` / gpu:"off") and PINNED
-        # models coexist and are never evicted; only unpinned GPU residents are
-        # cleared to make room for a new GPU model. A `@cpu` load evicts nothing.
+        # eviction policy: CPU-placed instances (`@cpu` / gpu:"off") never contend for
+        # GPU VRAM and are never evicted. PINNED (keep-warm) GPU models normally stay
+        # resident too — only unpinned GPU residents are cleared to make room. But if
+        # the requested model still won't load after that (VRAM too tight to hold the
+        # pinned keep-warm model AND the requested one — the OOM/borrow trap), the FINAL
+        # attempt evicts pinned GPU models too, as a last resort: running the model that
+        # was actually requested beats silently borrowing whatever is resident. The
+        # evicted keep-warm model reloads later via JIT/keep-warm. Disable the last-resort
+        # step with setting `orch_evict_pinned_last_resort=0`. A `@cpu` target evicts nothing.
         new_is_cpu = model.endswith("@cpu") or str(_model_cfg_of(model).get("gpu")) == "off"
-        for attempt in range(2):
+        try:
+            from deps import get_setting
+            allow_evict_pinned = (get_setting("orch_evict_pinned_last_resort", "1") or "1") != "0"
+        except Exception:
+            allow_evict_pinned = True
+        ATTEMPTS = 3
+        for attempt in range(ATTEMPTS):
+            # Last resort only: normal attempts leave pinned keep-warm models alone; the
+            # final attempt may drop them if that is the only way to fit the requested model.
+            evict_pinned = allow_evict_pinned and attempt == ATTEMPTS - 1
             _, loaded = _match()
             for m in loaded:
                 if new_is_cpu:
                     continue                    # CPU loads never displace anyone
+                if m == model or m.endswith("/" + model) or model.endswith("/" + m):
+                    continue                    # never evict the target model itself
                 mc = _model_cfg_of(m)
-                if m.endswith("@cpu") or str(mc.get("gpu")) == "off" or mc.get("pin"):
-                    continue                    # CPU side-models + pinned stay resident
+                if m.endswith("@cpu") or str(mc.get("gpu")) == "off":
+                    continue                    # CPU side-models never contend for GPU VRAM
+                if mc.get("pin") and not evict_pinned:
+                    continue                    # pinned keep-warm stays — except on the last-resort attempt
+                if mc.get("pin"):
+                    log.warning("[orch] ensure_loaded: LAST-RESORT evicting PINNED keep-warm "
+                                "'%s' to make room for requested '%s'", m, model)
                 _ssh(LMS, "unload", m, timeout=20)
-            log.info("[orch] ensure_loaded: loading '%s' (attempt %d)", model, attempt + 1)
+            log.info("[orch] ensure_loaded: loading '%s' (attempt %d/%d%s)",
+                     model, attempt + 1, ATTEMPTS, ", evict-pinned" if evict_pinned else "")
             _ssh(LMS, *_load_args(model), timeout=240)
             time.sleep(3)                      # let it settle past any 'loading' state
             ok, now = _match()

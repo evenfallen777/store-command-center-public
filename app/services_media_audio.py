@@ -111,16 +111,46 @@ def _mux_audio(video: str, music: str, voice: str, out: str):
         fc = "[1:a]volume=0.6[a]"
     cmd = (["ffmpeg", "-y"] + inputs +
            ["-filter_complex", fc, "-map", "0:v", "-map", "[a]",
-            "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", out])
+            "-t", f"{dur:.2f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", out])
     subprocess.run(cmd, check=True, capture_output=True, timeout=180)
     return out
 
 
-def add_video_audio(vid_id: int, music_prompt: str, narration: str = ""):
-    """Background task: generate music (+ optional narration voice) for a video and mux
-    it on. Sets videos.audio_path / audio_status / audio_error."""
+def _video_audio_settings(row, settings: dict | None) -> dict:
+    """Resolve the layered audio settings for ONE video (chain parity):
+    explicit caller settings win, else the video's stored audio_settings JSON,
+    else None → the caller falls back to the legacy music+voice behavior.
+    Returns (settings dict based on DEFAULT_CHAIN_AUDIO, explicit?) — the
+    dict always has every DEFAULT_CHAIN_AUDIO key."""
+    from services_media_chain import DEFAULT_CHAIN_AUDIO
+    s = dict(DEFAULT_CHAIN_AUDIO)
+    src = settings if isinstance(settings, dict) else None
+    if src is None:
+        try:
+            raw = row["audio_settings"] if "audio_settings" in row.keys() else None
+            src = json.loads(raw) if raw else None
+        except Exception:
+            src = None
+    explicit = isinstance(src, dict)
+    if explicit:
+        for k, v in src.items():
+            if k in s and v is not None:
+                s[k] = v
+    return s, explicit
+
+
+def add_video_audio(vid_id: int, music_prompt: str, narration: str = "",
+                    settings: dict | None = None):
+    """Background task: generate a layered soundtrack for a video and mux it on —
+    music bed + optional TTS narration + optional SFX, with the same engine and
+    per-layer volume choices the chain builder offers (settings keys mirror
+    DEFAULT_CHAIN_AUDIO). No settings anywhere (legacy callers) = the old
+    behavior exactly: music + voice-only-if-narration at the old fixed volumes.
+    Sets videos.audio_path / audio_status / audio_error."""
     # Video-infra helpers live in services_media; import lazily to avoid an import cycle.
     from services_media import _video_preflight, _set_video_progress, _VIDEO_RUN_LOCK
+    from services_media_chain import _mux_chain_audio
     conn = get_conn()
     row = conn.execute("SELECT * FROM videos WHERE id=?", (vid_id,)).fetchone()
     conn.close()
@@ -128,14 +158,39 @@ def add_video_audio(vid_id: int, music_prompt: str, narration: str = ""):
         _set_audio(vid_id, "failed", err="Video file not found")
         return
     video = row["video_path"]
+    s, explicit = _video_audio_settings(row, settings)
+    # Explicit caller args (the card form / generate payload) override saved text.
+    if (music_prompt or "").strip():
+        s["music_prompt"] = music_prompt.strip()
+    if (narration or "").strip():
+        s["narration"] = narration.strip()
+    if not explicit:
+        # Legacy shape: always music, voice only when narration was given, no
+        # SFX — at the exact volumes the old fixed _mux_audio used.
+        s["music"], s["sfx"] = True, False
+        s["voice"] = bool(s["narration"])
+        s["music_volume"] = 0.28 if s["voice"] else 0.6
+        s["voice_volume"] = 1.0
+        s["music_engine"], s["voice_engine"] = "musicgen", "mms_tts"
+    if not (s["music"] or s["voice"] or s["sfx"]):
+        _set_audio(vid_id, "failed", err="All audio layers are switched off")
+        return
     _set_audio(vid_id, "generating")
     ok, msg = _video_preflight()
     if not ok:
         _set_audio(vid_id, "failed", err=msg)
         return
+
+    def _engine(e):
+        # Same gated-engine fallback as run_audio_clip: no HF token → MusicGen.
+        if e in GATED_ENGINES and not (get_setting("hf_token") or "").strip():
+            logger.warning("Video %d audio: engine '%s' is gated and no hf_token is set → using musicgen",
+                           vid_id, e)
+            return "musicgen"
+        return e or "musicgen"
+
     ts = int(datetime.now().timestamp())
-    music_wav = str(VIDEOS_DIR / f"aud_{vid_id}_music_{ts}.wav")
-    voice_wav = ""
+    music_wav = voice_wav = sfx_wav = ""
     with _VIDEO_RUN_LOCK:
         try:
             orch.video_acquire()
@@ -145,26 +200,63 @@ def add_video_audio(vid_id: int, music_prompt: str, narration: str = ""):
             return
         try:
             dur = max(4, int(_video_duration(video)) + 1)
-            _set_video_progress(vid_id, 15, "Composing music…")
-            _node_audio("music", music_prompt or (row["prompt"] or "gentle background music"),
-                        music_wav, duration=dur)
-            if narration.strip():
-                voice_wav = str(VIDEOS_DIR / f"aud_{vid_id}_voice_{ts}.wav")
-                _set_video_progress(vid_id, 55, "Recording narration…")
-                _node_audio("voice", narration.strip(), voice_wav)
+            errors = []
+            if s["music"]:
+                _set_video_progress(vid_id, 15, "Composing music…")
+                music_wav = str(VIDEOS_DIR / f"aud_{vid_id}_music_{ts}.wav")
+                try:
+                    _node_audio("music",
+                                str(s["music_prompt"] or "").strip()
+                                or (row["prompt"] or "gentle background music"),
+                                music_wav, duration=dur, engine=_engine(s["music_engine"]))
+                except Exception as ex:
+                    errors.append(f"music: {str(ex)[:160]}")
+                    music_wav = ""
+            if s["voice"]:
+                # Empty narration = the video's prompt is the script (the chain
+                # reads each scene's prompt the same way).
+                text = str(s["narration"] or "").strip() or (row["prompt"] or "").strip()
+                if text:
+                    voice_wav = str(VIDEOS_DIR / f"aud_{vid_id}_voice_{ts}.wav")
+                    _set_video_progress(vid_id, 50, "Recording narration…")
+                    try:
+                        _node_audio("voice", text, voice_wav, engine=s["voice_engine"])
+                    except Exception as ex:
+                        errors.append(f"voice: {str(ex)[:160]}")
+                        voice_wav = ""
+            if s["sfx"]:
+                sfx_wav = str(VIDEOS_DIR / f"aud_{vid_id}_sfx_{ts}.wav")
+                _set_video_progress(vid_id, 70, "Making sound effect…")
+                try:
+                    _node_audio("music",
+                                f"sound effect matching: {(row['prompt'] or '').strip()[:160]}, "
+                                "foley, no music, no melody",
+                                sfx_wav, duration=4, engine=_engine(s["music_engine"]))
+                except Exception as ex:
+                    errors.append(f"sfx: {str(ex)[:160]}")
+                    sfx_wav = ""
+            if not (music_wav or voice_wav or sfx_wav):
+                _set_audio(vid_id, "failed",
+                           err=("Audio failed — " + "; ".join(errors))[:400]
+                           if errors else "No audio layers generated")
+                return
             _set_video_progress(vid_id, 85, "Mixing audio into video…")
             out = str(VIDEOS_DIR / f"vid_{vid_id}_sound_{ts}.mp4")
-            _mux_audio(video, music_wav, voice_wav, out)
-            _set_audio(vid_id, "done", path=out)
+            _mux_chain_audio(video, music_wav,
+                             [(0.0, voice_wav)] if voice_wav else [],
+                             [(0.0, sfx_wav)] if sfx_wav else [], s, out)
+            _set_audio(vid_id, "done", path=out,
+                       err=("partial: " + "; ".join(errors))[:400] if errors else None)
             _set_video_progress(vid_id, 100, "Done")
-            logger.info("Video %d sounded: %s", vid_id, out)
+            logger.info("Video %d sounded: %s (music=%s voice=%s sfx=%s)",
+                        vid_id, out, bool(music_wav), bool(voice_wav), bool(sfx_wav))
         except subprocess.TimeoutExpired:
             _set_audio(vid_id, "failed", err="Audio generation timed out")
         except Exception as ex:
             logger.error("Video %d add-audio failed: %s", vid_id, ex)
             _set_audio(vid_id, "failed", err=str(ex)[:500])
         finally:
-            for w in (music_wav, voice_wav):
+            for w in (music_wav, voice_wav, sfx_wav):
                 try:
                     if w: Path(w).unlink(missing_ok=True)
                 except Exception:

@@ -352,3 +352,176 @@ def test_notes_roundtrip_and_project_root(client):
 def test_notes_rejects_a_shell_y_project_root(client):
     r = client.post("/api/games/notes", json={"project_root": "~/games; rm -rf /"})
     assert r.status_code == 400
+
+
+# ─── editor MCP: model setting + queue-routed bridge calls ───────────────────
+
+def test_mcp_settings_roundtrip_and_rejects_bad_input(client):
+    r = client.post("/api/games/mcp/settings",
+                    json={"model": "google/gemma-3-4b-qat",
+                          "project": "/mnt/projects/unreal/Sandbox"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["model"] == "google/gemma-3-4b-qat"
+    assert d["project"] == "/mnt/projects/unreal/Sandbox"
+
+    seen = client.get("/api/games/mcp").json()
+    assert seen["mcp_model"] == "google/gemma-3-4b-qat"
+
+    assert client.post("/api/games/mcp/settings",
+                       json={"model": "bad; rm -rf /"}).status_code == 400
+    assert client.post("/api/games/mcp/settings",
+                       json={"project": "/tmp/x; reboot"}).status_code == 400
+
+
+def test_mcp_bridge_reports_missing_port_file_as_state_not_error(client, monkeypatch):
+    """No port.json = the editor simply has not started the bridge. That is a
+    first-class state, never an exception."""
+    from routers import games
+    monkeypatch.setattr(games, "_ssh", _ssh_returning("NOPORTFILE\n"))
+    client.post("/api/games/mcp/settings", json={"project": "/mnt/projects/unreal/Sandbox"})
+    d = client.get("/api/games/mcp/bridge").json()
+    assert d["running"] is False and d["port"] == 0
+    assert "bridge" in (d["error"] or "").lower()
+
+
+def test_mcp_bridge_reads_the_published_port(client, monkeypatch):
+    """The bridge port is derived per-worktree — we must read port.json, not
+    assume the 9877 the Node client defaults to."""
+    from routers import games
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(
+        '{"port": 62775, "pid": 3073501, "apiVersion": 1}\n---\n1\n'))
+    client.post("/api/games/mcp/settings", json={"project": "/mnt/projects/unreal/Sandbox"})
+    d = client.get("/api/games/mcp/bridge").json()
+    assert d["port"] == 62775 and d["running"] is True
+
+
+def test_mcp_call_queues_and_loads_no_model_without_use_llm(client, monkeypatch):
+    """A bare editor command must ride the queue but load NO model — that is what
+    keeps co-op viable while the editor holds the VRAM."""
+    from routers import games
+    from orchestrator import orch
+
+    submitted = {}
+    real_submit = orch.submit_llm
+
+    def _spy(func, desc, **kw):
+        submitted.update(desc=desc, **kw)
+        return real_submit(func, desc, **kw)
+
+    monkeypatch.setattr(orch, "submit_llm", _spy)
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(
+        '{"port": 62775}\n---\n1\n'))
+    client.post("/api/games/mcp/settings",
+                json={"project": "/mnt/projects/unreal/Sandbox",
+                      "model": "google/gemma-3-4b-qat"})
+
+    r = client.post("/api/games/mcp/call", json={"method": "get_current_level"})
+    assert r.status_code == 200
+    assert r.json()["queued"] is True
+    assert submitted["model"] is None, "no LLM for a plain editor command"
+    assert submitted["source"] == "games_mcp"
+
+    r = client.post("/api/games/mcp/call",
+                    json={"method": "get_current_level", "use_llm": True})
+    assert r.status_code == 200
+    assert submitted["model"] == "google/gemma-3-4b-qat"
+
+    # These submit REAL tasks to the shared orchestrator. Left queued, they make
+    # _store_busy() read True and break gpu_guard's tests downstream.
+    orch.clear_pending()
+
+
+def test_mcp_call_rejects_bad_method_and_missing_project(client):
+    client.post("/api/games/mcp/settings", json={"project": ""})
+    assert client.post("/api/games/mcp/call",
+                       json={"method": "rm -rf /"}).status_code == 400
+    assert client.post("/api/games/mcp/call",
+                       json={"method": "get_current_level"}).status_code == 400
+
+
+def test_unity_mcp_install_validates_and_is_reversible(client, monkeypatch):
+    """Installing Unity MCP rewrites a real project's manifest, so the endpoint
+    must validate hard and never fire implicitly."""
+    from routers import games
+
+    assert client.post("/api/games/mcp/unity",
+                       json={"project": "/tmp/x; reboot"}).status_code == 400
+    assert client.post("/api/games/mcp/unity",
+                       json={"project": "/mnt/projects/Unity/Projects/X",
+                             "action": "sudo"}).status_code == 400
+    assert client.post("/api/games/mcp/unity", json={}).status_code == 400
+
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(
+        '{"ok": true, "changed": true, "backup": "/p/Packages/manifest.json.bak-1", '
+        '"manifest": "/p/Packages/manifest.json", "action": "install"}'))
+    r = client.post("/api/games/mcp/unity",
+                    json={"project": "/mnt/projects/Unity/Projects/Chao World"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["changed"] is True and d["package"] == games.UNITY_MCP_PKG
+    assert "backup" in d and "Unity" in d["next"]
+
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(
+        '{"ok": false, "error": "no Packages/manifest.json - not a Unity project"}'))
+    r = client.post("/api/games/mcp/unity",
+                    json={"project": "/mnt/projects/unreal/Sandbox"})
+    assert r.status_code == 400
+    assert "manifest" in r.json()["error"]
+
+
+def test_engines_report_every_installed_version(client, games, monkeypatch):
+    """Unity is routinely kept multi-version on purpose (a 2022.3 project
+    force-upgrades if opened in Unity 6), so reporting only the newest is wrong."""
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(
+        "godot|/x/godot|4.7.1.stable\n"
+        "unity|/mnt/p/Unity/Hub/Editor/6000.5.5f1/Editor/Unity|6000.5.5f1"
+        "|2022.3.62f3,6000.0.80f1,6000.5.5f1\n"
+        "unreal|/home/u/.local/bin/UnrealEditor|5.8.0\n"
+        "disk|56|\n"))
+    by = {e["key"]: e for e in client.get("/api/games/engines").json()["engines"]}
+    assert by["unity"]["version"] == "6000.5.5f1", "newest stays the headline version"
+    assert by["unity"]["versions"] == ["2022.3.62f3", "6000.0.80f1", "6000.5.5f1"]
+    # engines with a single install still get a usable list, not an empty one
+    assert by["unreal"]["versions"] == ["5.8.0"]
+    assert by["godot"]["versions"] == ["4.7.1.stable"]
+
+
+def test_engines_versions_absent_when_not_installed(client, games, monkeypatch):
+    monkeypatch.setattr(games, "_ssh", _ssh_returning(GODOT_ONLY))
+    by = {e["key"]: e for e in client.get("/api/games/engines").json()["engines"]}
+    assert by["unity"]["versions"] == []
+    assert by["godot"]["versions"] == ["4.7.1.stable.official.a13da4feb"]
+
+
+def test_projects_scan_supports_multiple_roots(client, games, monkeypatch):
+    """Projects legitimately span drives: Unreal must sit on ext4 (ntfs-3g deadlocks
+    on its small-file I/O) while a 21-project Unity library is too big to move."""
+    seen = {}
+
+    def _spy(cmd, timeout=30):
+        seen["cmd"] = cmd
+        return 0, ("/mnt/space/unreal/Sandbox/Sandbox.uproject|1770000000.0\n"
+                   "/mnt/projects/Unity/Projects/Chao World/ProjectSettings/ProjectVersion.txt|1760000000.0\n")
+
+    monkeypatch.setattr(games, "_ssh", _spy)
+    client.post("/api/games/notes", json={"project_root": "/mnt/projects,/mnt/space"})
+    d = client.get("/api/games/projects?refresh=1").json()
+    by = {p["name"]: p for p in d["projects"]}
+    assert by["Sandbox"]["engine"] == "unreal"
+    assert by["Sandbox"]["path"].startswith("/mnt/space")
+    assert by["Chao World"]["engine"] == "unity"
+    assert "/mnt/space" in seen["cmd"] and "/mnt/projects" in seen["cmd"]
+    assert games._project_roots() == ["/mnt/projects", "/mnt/space"]
+
+
+def test_projects_all_roots_missing_is_empty_state(client, games, monkeypatch):
+    monkeypatch.setattr(games, "_ssh", _ssh_returning("NOROOT\n"))
+    client.post("/api/games/notes", json={"project_root": "/nope/one,/nope/two"})
+    d = client.get("/api/games/projects?refresh=1").json()
+    assert d["projects"] == [] and d["root_exists"] is False and d["error"] is None
+
+
+def test_project_root_rejects_shell_metacharacters(client):
+    assert client.post("/api/games/notes",
+                       json={"project_root": "/mnt/a; rm -rf /"}).status_code == 400

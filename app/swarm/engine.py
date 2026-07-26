@@ -7,6 +7,7 @@ entrypoints start_job / is_running / reconcile_on_start.
 Layering (top of the package graph): depends on ._base, .llm, .workspace, .systasks.
 """
 import json
+import logging
 import subprocess
 import threading
 from pathlib import Path
@@ -21,6 +22,8 @@ from .workspace import (_git_dev, _git_ws, _push_ws, _scoped_paths, _path_allowe
                         _read_scoped_context, _fallback_single_file, _repo_tree, _read_files,
                         _job_project, _job_workdir, _prepare_workdir)
 from .systasks import propose_system_task
+
+log = logging.getLogger("swarm")
 
 _running: set[int] = set()
 _running_lock = threading.Lock()
@@ -197,7 +200,7 @@ def _stage_architect(job, roster, cfg):
             if f and f not in want:
                 want.append(f)
     except Exception as e:
-        logger.warning("swarm scout failed: %s", e)
+        log.warning("swarm scout failed: %s", e)
     file_ctx, read = _read_files(want, base=base)
     _ev(jid, "architect", "system",
         ("Read for context: " + ", ".join(read)) if read else "No readable context files.",

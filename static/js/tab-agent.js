@@ -54,6 +54,7 @@ async function renderAgent() {
       </div>
     </div>
     <div id="agent-settings-pane" class="agent-settings-pane" style="display:none;"></div>
+    <div id="agent-voice" class="agent-voice-bar"></div>
     <div class="agent-chat" id="agent-chat">
       <div class="agent-msgs" id="agent-msgs"></div>
       <div class="agent-input-row">
@@ -70,6 +71,10 @@ async function renderAgent() {
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
   });
+
+  // Voice ("Jarvis") lives inline in this tab. Re-mounts each render (main-content
+  // is rewritten); VoiceJarvis.init is re-mountable and reuses this conversation.
+  if (window.VoiceJarvis) VoiceJarvis.init(document.getElementById('agent-voice'));
 
   await agentRefreshConvs();
   await agentRefreshSkills();

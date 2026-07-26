@@ -527,6 +527,8 @@
       <div class="nav-group-title">Studio <span class="nav-group-chev">&#9662;</span></div>
       <div class="nav-group-items">
         <div class="nav-item" data-view="studio"><span class="nav-icon">&#127917;</span><span>Studio</span><span class="nav-badge warn" id="badge-m3d">0</span></div>
+        <!-- 🍿 TV — prompt-to-television, shows/episodes/canon (docs/TV-DESIGN.md); tab-tv.js routes it via registerView('tv') -->
+        <div class="nav-item" data-view="tv"><span class="nav-icon">&#127871;</span><span>TV</span></div>
         <!-- Private Studio (NSFW) — hidden unless nsfw_enabled AND nsfw_display are on (tab-nsfw.js updateNsfwNav) -->
         <div class="nav-item" data-view="nsfw" id="nav-nsfw" style="display:none;"><span class="nav-icon">&#128274;</span><span>Private Studio</span></div>
       </div>
@@ -760,6 +762,8 @@
   <script src='/store/static/js/tab-products.js'></script>
   <script src='/store/static/js/tab-trends.js'></script>
   <script src='/store/static/js/tab-agent.js'></script>
+  <script src='/store/static/js/voice-wake.js'></script>
+  <script src='/store/static/js/voice-jarvis.js'></script>
   <script src='/store/static/js/tab-models.js'></script>
   <script src='/store/static/js/models-image.js'></script>
   <script src='/store/static/js/models-video-audio.js'></script>
@@ -875,6 +879,8 @@
   <script src='/store/static/js/tab-graph.js'></script>
   <script src='/store/static/js/tab-knowledge.js'></script>
   <script src='/store/static/js/plugin-loader.js'></script>
+  <!-- 🍿 TV tab — registers its view via registerView('tv') (plugin-loader.js), so it must load after it -->
+  <script src='/store/static/js/tab-tv.js'></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
       const navItems = document.querySelectorAll('.nav-item');

@@ -35,6 +35,20 @@ STALE_SEC = 300   # guard-paused + no heartbeat this long → assume guard dead,
 #                             is auto-released.
 #   gpu_miner_exclusive (1) — 0/off: node stops gating JellyMiner on queue
 #                             activity (back to always-on throttled coexistence).
+#   gpu_guard_editor_mode (1) — CO-OP: a game ENGINE EDITOR (Unreal/Unity/Godot)
+#                             does NOT pause the queue. Instead the node reports
+#                             mode="editor" and the Store keeps serving LLM work
+#                             on a small model (games_mcp_model) that fits
+#                             ALONGSIDE the editor, while VRAM-hungry job kinds
+#                             (image/video/3D) are held. 0/off: editors are
+#                             treated as ordinary heavy apps (full pause).
+#
+# Why co-op exists: the guard's original premise is "AI yields to the desktop".
+# That breaks when the AI is DRIVING the editor over MCP — pausing the queue is
+# exactly the wrong move. Co-op shrinks the AI footprint to fit instead of
+# stopping it. It is NOT a licence to ignore VRAM: a 12 GB card cannot hold the
+# 12B keep-warm default AND an Unreal editor, which is why the model used while
+# an editor is up is a separate, deliberately small setting.
 
 def _setting(key: str, default):
     try:
@@ -62,7 +76,35 @@ _state = {
     "last_beat": 0.0,
     "since": 0.0,
     "interrupted": {},       # {generations/videos/chains/audio: [ids]} mid-flight at pause
+    "mode": "",              # "" | heavy | editor | tdarr — what KIND of busy
+    "editor_active": False,  # a game-engine editor is up and we are co-operating
 }
+
+
+# ── editor co-op ──────────────────────────────────────────────────────────────
+
+def editor_active() -> bool:
+    """True while a game-engine editor holds the GPU under co-op mode.
+
+    Callers that are about to queue VRAM-hungry work (image/video/3D) should
+    check this and hold off — the editor owns the headroom those jobs need."""
+    return bool(_state["editor_active"])
+
+
+def mcp_model() -> str:
+    """Model to use for editor/MCP-driven LLM work. Deliberately separate from
+    the orchestrator default: the keep-warm 12B will not fit beside an Unreal
+    editor on a 12 GB card, so this is where you name something that does
+    (a 4B QAT, a 7B at Q4, or a CPU-hosted model). Blank = orchestrator default,
+    which is the right answer for Godot but NOT for Unreal."""
+    return str(_setting("games_mcp_model", "") or "").strip()
+
+
+def coop_blocks_media() -> bool:
+    """Under co-op we keep LLM work flowing but hold image/video/3D — those are
+    the kinds that would race the editor for the same VRAM the guard just chose
+    not to reclaim."""
+    return editor_active()
 
 
 def _snapshot_generating() -> dict:
@@ -148,7 +190,8 @@ def maybe_unstick():
 def guard_info() -> dict:
     """Snapshot for the Dashboard: is the node interactively busy, and with what."""
     return {"busy": _state["busy"], "apps": list(_state["apps"]),
-            "since": _state["since"], "guard_paused": _state["guard_paused"]}
+            "since": _state["since"], "guard_paused": _state["guard_paused"],
+            "mode": _state["mode"], "editor_active": _state["editor_active"]}
 
 
 def _store_busy() -> bool:
@@ -180,7 +223,34 @@ def guard_beat(request: Request, payload: dict = Body(...)):
     _check_miner(request)
     busy = bool(payload.get("busy"))
     apps = [str(a)[:60] for a in (payload.get("apps") or [])][:10]
+    mode = str(payload.get("mode") or "heavy").strip().lower()
+    if mode not in ("heavy", "editor", "tdarr"):
+        mode = "heavy"
     _state["last_beat"] = time.time()
+
+    # ── co-op: an engine editor is up, and we choose NOT to pause ────────────
+    # Distinct from the guard-disabled branch below: there we are hands-off
+    # everywhere, here we stay in control (media held, small model) and simply
+    # decline to stop LLM work the editor itself may be waiting on.
+    if busy and mode == "editor" and _flag("gpu_guard_enabled") \
+            and _flag("gpu_guard_editor_mode"):
+        if not _state["editor_active"]:
+            log.info("engine editor up (%s) — co-op mode: queue keeps running on %s, "
+                     "media jobs held", ", ".join(apps) or "?",
+                     mcp_model() or "the default model")
+            _state["since"] = time.time()
+        # A pause we set earlier (e.g. the editor was launched from a Steam
+        # shell that tripped the heavy path first) is released — co-op supersedes.
+        if _state["guard_paused"]:
+            _state["guard_paused"] = False
+            if orch.is_paused():
+                orch.resume()
+            _resume_interrupted()
+        _state.update(busy=True, apps=apps, mode="editor", editor_active=True)
+        return {"ok": True, "paused": orch.is_paused(), "mode": "editor",
+                "guard_paused": False, "editor_active": True,
+                "mcp_model": mcp_model()}
+
     if busy and not _flag("gpu_guard_enabled"):
         # Guard disabled in Settings: keep the node's state visible on the
         # Dashboard but never pause — and release a pause we set before the
@@ -191,7 +261,7 @@ def guard_beat(request: Request, payload: dict = Body(...)):
             orch.resume()
         if not _state["busy"]:
             _state["since"] = time.time()
-        _state.update(busy=True, apps=apps)
+        _state.update(busy=True, apps=apps, mode=mode, editor_active=False)
     elif busy:
         if not _state["busy"]:
             log.info("node busy (%s) — pausing GPU queue", ", ".join(apps) or "?")
@@ -201,17 +271,19 @@ def guard_beat(request: Request, payload: dict = Body(...)):
         if not orch.is_paused():
             orch.pause()
             _state["guard_paused"] = True
-        _state.update(busy=True, apps=apps)
+        _state.update(busy=True, apps=apps, mode=mode, editor_active=False)
     else:
         if _state["busy"]:
             log.info("node free — resuming GPU queue")
         was_ours = _state["guard_paused"]
-        _state.update(busy=False, apps=[], since=0.0, guard_paused=False)
+        _state.update(busy=False, apps=[], since=0.0, guard_paused=False,
+                      mode="", editor_active=False)
         if was_ours and orch.is_paused():
             orch.resume()
             _resume_interrupted()
-    return {"ok": True, "paused": orch.is_paused(),
-            "guard_paused": _state["guard_paused"]}
+    return {"ok": True, "paused": orch.is_paused(), "mode": _state["mode"],
+            "guard_paused": _state["guard_paused"],
+            "editor_active": _state["editor_active"]}
 
 
 @router.get("/api/gpu/guard/state")
@@ -225,4 +297,8 @@ def guard_status(request: Request):
             "llm": s["llm"], "active_images": s["active_images"],
             "queue_len": len(s["queue"]), "store_busy": _store_busy(),
             "guard_enabled": _flag("gpu_guard_enabled"),
-            "miner_exclusive": _flag("gpu_miner_exclusive")}
+            "miner_exclusive": _flag("gpu_miner_exclusive"),
+            # the node reads these to decide whether an editor gets the co-op
+            # path (no kills, no unload) or the ordinary heavy path
+            "editor_mode": _flag("gpu_guard_editor_mode"),
+            "mcp_model": mcp_model()}

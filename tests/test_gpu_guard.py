@@ -234,3 +234,85 @@ def test_stale_guard_auto_resumes(client, monkeypatch):
     gpu_guard.maybe_unstick()
     assert not orch.is_paused()
     assert gpu_guard.guard_info()["busy"] is False
+
+
+# ── editor co-op ──────────────────────────────────────────────────────────────
+
+def test_editor_mode_does_not_pause_the_queue(client):
+    """mode="editor" is the whole point of co-op: an engine editor must NOT stop
+    the queue, because the AI may be driving that editor over MCP — pausing would
+    deadlock the work the user just started."""
+    from db import get_conn
+    from orchestrator import orch
+    from routers import gpu_guard
+
+    conn = get_conn()
+    orch.resume()
+    r = client.post("/api/gpu/guard/state",
+                    json={"busy": True, "apps": ["UnrealEditor"], "mode": "editor"})
+    assert r.status_code == 200
+    assert not orch.is_paused(), "editor co-op must never pause the queue"
+    body = r.json()
+    assert body["mode"] == "editor" and body["editor_active"] is True
+    assert body["guard_paused"] is False
+    assert gpu_guard.editor_active() is True
+    assert gpu_guard.coop_blocks_media() is True, "media jobs are held under co-op"
+
+    client.post("/api/gpu/guard/state", json={"busy": False})
+    assert gpu_guard.editor_active() is False
+    conn.close()
+
+
+def test_editor_mode_off_falls_back_to_full_pause(client):
+    """With gpu_guard_editor_mode=0 an editor is an ordinary heavy app again."""
+    from db import get_conn
+    from orchestrator import orch
+
+    conn = get_conn()
+    orch.resume()
+    _set(conn, "gpu_guard_editor_mode", "0")
+    r = client.post("/api/gpu/guard/state",
+                    json={"busy": True, "apps": ["UnrealEditor"], "mode": "editor"})
+    assert orch.is_paused(), "co-op disabled → editor pauses like any heavy app"
+    assert r.json()["editor_active"] is False
+
+    _set(conn, "gpu_guard_editor_mode", "1")
+    client.post("/api/gpu/guard/state", json={"busy": False})
+    conn.close()
+
+
+def test_editor_coop_releases_a_pause_taken_by_the_heavy_path(client):
+    """Launching an editor from a shell that first tripped the heavy path must
+    end in co-op, not stay paused."""
+    from db import get_conn
+    from orchestrator import orch
+
+    conn = get_conn()
+    orch.resume()
+    client.post("/api/gpu/guard/state", json={"busy": True, "apps": ["blender"]})
+    assert orch.is_paused()
+
+    client.post("/api/gpu/guard/state",
+                json={"busy": True, "apps": ["UnrealEditor"], "mode": "editor"})
+    assert not orch.is_paused(), "co-op supersedes an earlier heavy pause"
+
+    client.post("/api/gpu/guard/state", json={"busy": False})
+    conn.close()
+
+
+def test_mcp_model_setting_is_exposed_to_the_node(client):
+    """The node reads editor_mode + mcp_model off the GET to decide co-op vs the
+    heavy handoff, and which model fits beside the editor."""
+    from db import get_conn
+    from routers import gpu_guard
+
+    conn = get_conn()
+    _set(conn, "games_mcp_model", "google/gemma-3-4b-qat")
+    st = client.get("/api/gpu/guard/state").json()
+    assert st["editor_mode"] is True
+    assert st["mcp_model"] == "google/gemma-3-4b-qat"
+    assert gpu_guard.mcp_model() == "google/gemma-3-4b-qat"
+
+    _set(conn, "games_mcp_model", "")
+    assert gpu_guard.mcp_model() == "", "blank = orchestrator default"
+    conn.close()

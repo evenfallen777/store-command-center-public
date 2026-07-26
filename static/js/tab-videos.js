@@ -68,6 +68,55 @@ function setHTMLKeepMedia(el, html) {
 }
 window.setHTMLKeepMedia = setHTMLKeepMedia;
 
+/* ── keyed card-list diffing ──
+   The 2-2.5 s status polls used to rebuild the WHOLE gallery innerHTML every
+   tick, tearing down and reloading every <video> element — visible flicker on
+   the whole tab while anything generates, and interrupted media loads that
+   surface as "No video with supported format and MIME type found". Instead
+   each card lives in its own keyed cell and is re-rendered ONLY when its
+   rendered HTML actually changed; an unchanged card (e.g. a done video that's
+   playing) is never touched by the poll. */
+function syncCards(grid, items, cardFn) {
+  const seen = new Set();
+  let anchor = null;                                  // last correctly-placed cell
+  for (const it of items) {
+    const key = String(it.id);
+    seen.add(key);
+    const html = cardFn(it);
+    let cell = grid.querySelector(`:scope > [data-key="${key}"]`);
+    if (!cell) {
+      cell = document.createElement('div');
+      cell.setAttribute('data-key', key);
+      cell.innerHTML = html;
+      cell._cardHtml = html;
+      grid.insertBefore(cell, anchor ? anchor.nextElementSibling : grid.firstElementChild);
+    } else {
+      if (cell._cardHtml !== html) { setHTMLKeepMedia(cell, html); cell._cardHtml = html; }
+      const want = anchor ? anchor.nextElementSibling : grid.firstElementChild;
+      if (want !== cell) grid.insertBefore(cell, want);
+    }
+    anchor = cell;
+  }
+  for (const cell of [...grid.children]) {
+    if (!seen.has(cell.getAttribute('data-key'))) { stopMediaIn(cell); cell.remove(); }
+  }
+}
+window.syncCards = syncCards;
+
+/* One-shot retry when a <source> fails to load — e.g. the file landed on disk
+   a beat after the card rendered, or the server hiccuped while the GPU node
+   was busy. Re-running load() re-fetches the same URL; max 2 tries so a
+   genuinely broken file still shows the browser's error. */
+function _srcRetry(sourceEl) {
+  const v = sourceEl.parentElement;
+  if (!v || v.tagName !== 'VIDEO') return;
+  const tries = +(v.dataset.srcRetries || 0);
+  if (tries >= 2) return;
+  v.dataset.srcRetries = tries + 1;
+  setTimeout(() => { try { v.load(); } catch {} }, 1600 * (tries + 1));
+}
+window._srcRetry = _srcRetry;
+
 /* ── VIDEO GENERATION ── */
 let _videosPollTimer = null;
 
@@ -133,12 +182,48 @@ async function renderVideos() {
       <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
         <label style="font-size:.82rem;color:var(--text);display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="vid-audio-en" style="width:auto" onchange="document.getElementById('vid-audio-settings').style.display=this.checked?'block':'none'">
-          &#128266; Generate with audio ${hlp('After the video renders, background music (and optional narration) is generated on the GPU node and mixed onto the clip automatically — same engines as the per-video “Add sound” button. Off = current behavior (silent video).')}
+          &#128266; Generate with audio ${hlp('After the video renders, a layered soundtrack is generated on the GPU node and mixed onto the clip automatically: background music, spoken narration (TTS) and optional sound effects — the same layers, engines and volume controls as the chain builder. Off = current behavior (silent video).')}
         </label>
         <div id="vid-audio-settings" style="display:none;margin-top:8px;background:var(--surface2,#16161f);border:1px solid var(--border);border-radius:8px;padding:10px">
-          <input id="vid-audio-music" placeholder="Music vibe (optional — default: derived from the video prompt)" style="width:100%;margin-bottom:6px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box">
-          <textarea id="vid-audio-narration" placeholder="Narration to speak over it (optional — empty = music only)" rows="2" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box;resize:vertical"></textarea>
-          <div style="font-size:.68rem;color:var(--muted);margin-top:4px">Music loops under the clip; narration plays on top (MMS-TTS). Adds ~1 min after the render.</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="vid-aud-music" checked style="width:auto"> &#127925; Music bed</label>
+              <select id="vid-aud-music-engine" style="width:100%;margin-top:6px;padding:6px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem">
+                <option value="musicgen" selected>MusicGen (fast)</option>
+                <option value="musicgen_med">MusicGen Medium (richer)</option>
+                <option value="stable_audio">Stable Audio Open (hi-fi, needs HF token)</option>
+                <option value="acestep">ACE-Step (songs w/ vocals)</option>
+              </select>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="vid-aud-music-vol" min="0" max="1" step="0.02" value="0.28" style="width:100%"
+                  oninput="document.getElementById('vid-aud-music-vol-val').textContent=this.value">
+                <span id="vid-aud-music-vol-val">0.28</span></label>
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="vid-aud-voice" checked style="width:auto"> &#128483;&#65039; Narration (TTS)</label>
+              <select id="vid-aud-voice-engine" style="width:100%;margin-top:6px;padding:6px 8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:.78rem">
+                <option value="mms_tts" selected>MMS-TTS (voice narration)</option>
+              </select>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="vid-aud-voice-vol" min="0" max="1.5" step="0.05" value="1.0" style="width:100%"
+                  oninput="document.getElementById('vid-aud-voice-vol-val').textContent=this.value">
+                <span id="vid-aud-voice-vol-val">1.0</span></label>
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="vid-aud-sfx" style="width:auto"> &#128165; Sound effects</label>
+              <div style="font-size:.68rem;color:var(--muted);margin-top:6px">One short effect matched to the prompt (slower — one extra clip).</div>
+              <label style="font-size:.7rem;color:var(--muted);display:block;margin-top:6px">Volume
+                <input type="range" id="vid-aud-sfx-vol" min="0" max="1.5" step="0.05" value="0.6" style="width:100%"
+                  oninput="document.getElementById('vid-aud-sfx-vol-val').textContent=this.value">
+                <span id="vid-aud-sfx-vol-val">0.6</span></label>
+            </div>
+          </div>
+          <input id="vid-audio-music" placeholder="Music vibe (optional — default: derived from the video prompt)" style="width:100%;margin-top:10px;margin-bottom:6px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box">
+          <textarea id="vid-audio-narration" placeholder="Narration to speak over it (optional — empty = the video prompt is read)" rows="2" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;box-sizing:border-box;resize:vertical"></textarea>
+          <div style="font-size:.68rem;color:var(--muted);margin-top:4px">Music loops under the clip; narration plays on top; SFX layers in — same mixer as chain audio. Adds ~1 min after the render.</div>
         </div>
       </div>
       <div style="margin-top:12px;font-size:.78rem;color:var(--muted)">
@@ -286,9 +371,10 @@ async function submitVideoGen() {
   const steps    = parseInt(document.getElementById('vid-steps').value);
   const modelSel = document.getElementById('vid-model');
   const model_id = modelSel ? modelSel.value : 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers';
-  const audio_enabled = !!document.getElementById('vid-audio-en')?.checked;
-  const music_prompt  = document.getElementById('vid-audio-music')?.value.trim() || '';
-  const narration     = document.getElementById('vid-audio-narration')?.value.trim() || '';
+  const audio_enabled  = !!document.getElementById('vid-audio-en')?.checked;
+  const audio_settings = audio_enabled ? _vidAudioSettings() : null;
+  const music_prompt   = audio_settings ? audio_settings.music_prompt : '';
+  const narration      = audio_settings ? audio_settings.narration : '';
   const btn      = document.getElementById('vid-gen-btn');
   btn.disabled = true; btn.textContent = '\u23F3 Queued\u2026';
   try {
@@ -296,7 +382,7 @@ async function submitVideoGen() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({prompt, width: w, height: h, num_frames: frames, steps, model_id,
-                            audio_enabled, music_prompt, narration})
+                            audio_enabled, audio_settings, music_prompt, narration})
     });
     if (!r.ok) throw new Error(await r.text());
     toast('Video queued! Generating on RTX 3060\u2026');
@@ -306,6 +392,27 @@ async function submitVideoGen() {
     toast('Error: ' + e.message, 'error');
     btn.disabled = false; btn.textContent = '\u26A1 Generate';
   }
+}
+
+/* Read the single-video audio panel into the audio_settings payload — the
+   exact keys of videos-chains.js _chainAudioSettings() / the server's
+   DEFAULT_CHAIN_AUDIO, so one video's "Generate with audio" carries the same
+   layers/engines/volumes as a chain's. */
+function _vidAudioSettings() {
+  const val = (id, d) => { const e = document.getElementById(id); return e ? e.value : d; };
+  const chk = id => !!document.getElementById(id)?.checked;
+  return {
+    music: chk('vid-aud-music'),
+    voice: chk('vid-aud-voice'),
+    sfx:   chk('vid-aud-sfx'),
+    music_volume: parseFloat(val('vid-aud-music-vol', '0.28')) || 0.28,
+    voice_volume: parseFloat(val('vid-aud-voice-vol', '1')) || 1.0,
+    sfx_volume:   parseFloat(val('vid-aud-sfx-vol', '0.6')) || 0.6,
+    music_engine: val('vid-aud-music-engine', 'musicgen') || 'musicgen',
+    voice_engine: val('vid-aud-voice-engine', 'mms_tts') || 'mms_tts',
+    music_prompt: (val('vid-audio-music', '') || '').trim(),
+    narration:    (val('vid-audio-narration', '') || '').trim(),
+  };
 }
 
 async function refreshVideoGallery() {
@@ -321,11 +428,18 @@ async function refreshVideoGallery() {
   } catch { return; }
   const hasActive = videos.some(v => ['queued','generating'].includes(v.status) || ['queued','generating'].includes(v.audio_status));
   if (!videos.length) {
-    setHTMLKeepMedia(el, '<div style="text-align:center;color:var(--muted);padding:60px 20px">&#127916; No videos yet &mdash; generate your first one above!</div>');
+    stopMediaIn(el);
+    el.innerHTML = '<div style="text-align:center;color:var(--muted);padding:60px 20px">&#127916; No videos yet &mdash; generate your first one above!</div>';
   } else {
-    // setHTMLKeepMedia: the 2 s poll must not kill a playing preview's audio
-    // state (mute/volume/position) or leak detached audio — see the helpers.
-    setHTMLKeepMedia(el, `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">${videos.map(videoCard).join('')}</div>`);
+    // syncCards: the 2 s poll only re-renders cards whose data changed —
+    // unchanged players are never rebuilt (no flicker, no interrupted loads).
+    let grid = el.querySelector('[data-cards="videos"]');
+    if (!grid) {
+      stopMediaIn(el);
+      el.innerHTML = '<div data-cards="videos" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px"></div>';
+      grid = el.firstElementChild;
+    }
+    syncCards(grid, videos, videoCard);
   }
   if (hasActive) _videosPollTimer = setTimeout(refreshVideoGallery, 2000);
 }
@@ -347,7 +461,7 @@ function videoCard(v) {
   const preview = v.status === 'done' && playSrc ? `
     <video controls loop ${audioSrc ? '' : 'muted'} preload="metadata"
       style="width:100%;border-radius:8px;background:#000;max-height:220px;display:block">
-      <source src="${playSrc}" type="video/mp4">
+      <source src="${playSrc}" type="video/mp4" onerror="_srcRetry(this)">
     </video>${audioSrc ? '<div style="font-size:.68rem;color:#22c55e;margin-top:3px">&#128266; with sound</div>' : ''}` :
   v.status === 'generating' ? (() => {
     const pct = Math.max(2, Math.min(100, v.progress || 0));

@@ -26,6 +26,10 @@ class VideoRequest(BaseModel):
     audio_enabled: bool = False
     music_prompt: str = ""    # empty → add_video_audio derives one from the prompt
     narration: str = ""       # empty → music only, no voice
+    # Full layered settings (chain parity): music/voice/sfx toggles + per-layer
+    # volumes + engines — same keys as services_media_chain.DEFAULT_CHAIN_AUDIO.
+    # None = legacy behavior (music + voice-if-narration, fixed volumes).
+    audio_settings: dict | None = None
 
 class VideoChainRequest(BaseModel):
     title: str = ""
@@ -92,6 +96,12 @@ def list_video_chains():
     for c in chains:
         row = dict(c)
         row["prompts"] = json.loads(row["prompts"]) if row["prompts"] else []
+        # A DB path whose file is gone (cleanup, failed verify, mid-copy race)
+        # must not reach the UI — it renders a dead full-width player showing
+        # "No video with supported format and MIME type found".
+        for k in ("compiled_path", "final_path"):
+            if row.get(k) and not Path(row[k]).exists():
+                row[k] = None
         segs = conn.execute(
             "SELECT id,chain_index,status,video_path,prompt,progress,progress_msg FROM videos WHERE chain_id=? ORDER BY chain_index",
             (row["id"],)
@@ -283,7 +293,12 @@ def generate_chain_prompts(req: ChainPromptsRequest):
 def list_videos():
     conn = get_conn()
     # nsfw-flagged videos never appear here — /api/nsfw/library only.
-    rows = conn.execute("SELECT * FROM videos WHERE COALESCE(nsfw,0)=0 ORDER BY created_at DESC").fetchall()
+    # chain_id IS NULL: chain/studio/TV SEGMENTS live inside their chain's own
+    # card (segments list) — without this the singles gallery floods with every
+    # segment of every long render.
+    rows = conn.execute(
+        "SELECT * FROM videos WHERE COALESCE(nsfw,0)=0 AND chain_id IS NULL "
+        "ORDER BY created_at DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -300,7 +315,8 @@ def get_video(vid_id: int):
             raise HTTPException(status_code=404, detail="Video not found")
     return dict(row)
 
-def _run_video_then_audio(vid_id: int, music_prompt: str, narration: str):
+def _run_video_then_audio(vid_id: int, music_prompt: str, narration: str,
+                          settings: dict | None = None):
     """'Generate with audio' (opt-in): the normal generation, then the EXISTING
     add_video_audio bridge on success — one background task; every model call
     inside rides the unified GPU queue exactly as it does today."""
@@ -313,7 +329,7 @@ def _run_video_then_audio(vid_id: int, music_prompt: str, narration: str):
         conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL WHERE id=?", (vid_id,))
         conn.commit()
         conn.close()
-        add_video_audio(vid_id, music_prompt, narration)
+        add_video_audio(vid_id, music_prompt, narration, settings)
 
 
 @router.post("/api/videos/generate")
@@ -323,16 +339,18 @@ def create_video(req: VideoRequest, background_tasks: BackgroundTasks):
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO videos (prompt,width,height,num_frames,steps,fps,seed,status,model_id) "
-        "VALUES (?,?,?,?,?,?,?,'queued',?)",
-        (req.prompt, p["width"], p["height"], p["num_frames"], p["steps"], p["fps"], req.seed, req.model_id),
+        "INSERT INTO videos (prompt,width,height,num_frames,steps,fps,seed,status,model_id,audio_settings) "
+        "VALUES (?,?,?,?,?,?,?,'queued',?,?)",
+        (req.prompt, p["width"], p["height"], p["num_frames"], p["steps"], p["fps"], req.seed, req.model_id,
+         json.dumps(req.audio_settings) if req.audio_settings else None),
     )
     vid_id = c.lastrowid
     conn.commit()
     conn.close()
     if req.audio_enabled:
         background_tasks.add_task(_run_video_then_audio, vid_id,
-                                  req.music_prompt.strip(), req.narration.strip())
+                                  req.music_prompt.strip(), req.narration.strip(),
+                                  req.audio_settings)
     else:
         background_tasks.add_task(run_video_generation, vid_id)
     return {"id": vid_id, "status": "queued"}
@@ -388,12 +406,15 @@ def cancel_video_route(vid_id: int):
 class AddAudioRequest(BaseModel):
     music_prompt: str = ""
     narration: str = ""
+    # Optional full layered settings (chain parity). None = the video's stored
+    # audio_settings (saved by "Generate with audio"), else legacy music+voice.
+    settings: dict | None = None
 
 
 @router.post("/api/videos/{vid_id}/add-audio")
 def add_audio(vid_id: int, req: AddAudioRequest, background_tasks: BackgroundTasks):
-    """Bridge: generate background music (+ optional spoken narration) for a video
-    and mux it on. The result is served from videos.audio_path when done."""
+    """Bridge: generate a layered soundtrack (music bed + optional narration/SFX)
+    for a video and mux it on. The result is served from videos.audio_path when done."""
     conn = get_conn()
     row = conn.execute("SELECT status, video_path FROM videos WHERE id=?", (vid_id,)).fetchone()
     if not row:
@@ -402,10 +423,14 @@ def add_audio(vid_id: int, req: AddAudioRequest, background_tasks: BackgroundTas
     if row["status"] != "done" or not row["video_path"]:
         conn.close()
         raise HTTPException(400, "Video isn't finished yet")
-    conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL WHERE id=?", (vid_id,))
+    if req.settings is not None:
+        conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL,audio_settings=? WHERE id=?",
+                     (json.dumps(req.settings), vid_id))
+    else:
+        conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL WHERE id=?", (vid_id,))
     conn.commit()
     conn.close()
-    background_tasks.add_task(add_video_audio, vid_id, req.music_prompt, req.narration)
+    background_tasks.add_task(add_video_audio, vid_id, req.music_prompt, req.narration, req.settings)
     return {"ok": True, "status": "queued"}
 
 

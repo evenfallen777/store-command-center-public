@@ -266,6 +266,23 @@ CATALOG = [
     _S("mcp", "MCP server", "infra", "infra", tab=None, world_visible=False,
        subsystems=["fastapi-mcp mount at /api/mcp", "every endpoint as a tool"],
        notes="Infrastructure — how OpenClaw drives the Store."),
+    _S("gpu_guard", "GPU guard (node yields)", "infra", "toggle",
+       setting_key="gpu_guard_enabled", tab="games", world_visible=False,
+       subsystems=["heavy-app detect", "queue pause", "VRAM handoff", "miner gating"],
+       notes="OFF = node stays hands-off: no pause, no kills, no unload. Turn off "
+             "only if you want a game and the AI queue to fight over VRAM."),
+    _S("gpu_guard_editor", "GPU guard — editor co-op", "infra", "toggle",
+       setting_key="gpu_guard_editor_mode", tab="games", world_visible=False,
+       subsystems=["Unreal/Unity/Godot detect", "queue keeps running", "media held",
+                   "small MCP model"],
+       notes="ON = an engine editor does NOT pause the queue (so an agent can drive "
+             "the editor over MCP); image/video/3D are held and LLM work uses "
+             "games_mcp_model. OFF = editors are ordinary heavy apps."),
+    _S("games_mcp_model", "Editor/MCP model", "infra", "orphan",
+       setting_key="games_mcp_model", tab="games", world_visible=False,
+       notes="Model used for editor/MCP work while co-op is active. Blank = the "
+             "orchestrator default (12B) — which will NOT fit beside an Unreal "
+             "editor on a 12 GB card. Name something small here."),
 
     # ── Control Plane ────────────────────────────────────────────────────────
     _S("surface_company_settings", "⚙️ Company Settings modal", "control", "infra", tab="world",

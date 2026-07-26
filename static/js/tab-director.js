@@ -168,11 +168,20 @@ async function _dirRefreshInbox() {
   _dirClearPoll();
   let projects = [];
   try { projects = await api('/api/studio/projects'); } catch { return; }
-  // setHTMLKeepMedia (tab-videos.js): the poll re-render must not reset a
-  // playing preview's mute/volume or leak a detached player's audio.
-  setHTMLKeepMedia(el, projects.length
-    ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">${projects.map(_dirProjectCard).join('')}</div>`
-    : `<div style="text-align:center;color:var(--muted);padding:50px 20px">🎞️ No storyboards yet — drop an idea above.</div>`);
+  // syncCards (tab-videos.js): the poll only re-renders cards whose data
+  // changed — unchanged previews are never rebuilt (no flicker).
+  if (!projects.length) {
+    stopMediaIn(el);
+    el.innerHTML = `<div style="text-align:center;color:var(--muted);padding:50px 20px">🎞️ No storyboards yet — drop an idea above.</div>`;
+  } else {
+    let grid = el.querySelector('[data-cards="dir-projects"]');
+    if (!grid) {
+      stopMediaIn(el);
+      el.innerHTML = '<div data-cards="dir-projects" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px"></div>';
+      grid = el.firstElementChild;
+    }
+    syncCards(grid, projects, _dirProjectCard);
+  }
   if (projects.some(p => _DIR_BUSY.includes(p.status)) && _currentView === 'director') {
     _dirPollTimer = setTimeout(_dirRefreshInbox, 2500);
   }
@@ -322,16 +331,34 @@ async function _dirRenderEditor(id) {
   const allDone = scenes.length > 0 && scenes.every(s => s.status === 'done');
   const busy = _DIR_BUSY.includes(p.status) || scenes.some(s => s.status === 'queued' || s.status === 'rendering');
 
-  // setHTMLKeepMedia: the busy-poll re-render (every 2.5 s) rebuilds every
-  // <video> — keep each player's mute/volume/position and stop the old ones
-  // so their audio can't keep playing detached.
+  // Skeleton/dynamic split (the flicker fix): the full page renders ONLY when
+  // its structural inputs change; the 2.5 s busy poll touches just #dir-busy,
+  // the keyed scene cards and #dir-final — so the script/caption textareas
+  // the owner may be typing in and any playing preview are never rebuilt.
+  const busyHtml = busy ? `<div class="card" style="margin-bottom:14px;border-color:#f59e0b70">
+      <div style="font-size:.82rem;color:#f59e0b">⏳ ${esc(p.progress_msg || p.status + '…')}</div>
+      <div style="font-size:.72rem;color:var(--muted);margin-top:4px">The 3060 renders one segment at a time — a shot takes ~2–4 min. This page live-updates.</div>
+    </div>` : '';
+  const finalHtml = _dirFinalCard(p, allDone, busy);
+  const skelKey = JSON.stringify([p.status, busy, allDone,
+    scenes.map(s => s.id).join(','), (p.cues || []).map(c => c.id).join(','),
+    p.model_id, resVal, p.fps, p.steps, p.music_engine, p.voice_engine,
+    p.style, p.logline, p.script, p.captions, p.error]);
+  if (el._dirSkel === skelKey && document.getElementById('dir-scenes')) {
+    const bEl = document.getElementById('dir-busy');
+    if (bEl && bEl._html !== busyHtml) { bEl.innerHTML = busyHtml; bEl._html = busyHtml; }
+    const fEl = document.getElementById('dir-final');
+    if (fEl && fEl._html !== finalHtml) { setHTMLKeepMedia(fEl, finalHtml); fEl._html = finalHtml; }
+    syncCards(document.getElementById('dir-scenes'), scenes, sc => _dirSceneCard(sc, p));
+    if (busy && _currentView === 'director' && _dirOpenId === id) {
+      _dirPollTimer = setTimeout(() => { if (_currentView === 'director' && _dirOpenId === id) _dirRenderEditor(id); }, 2500);
+    }
+    return;
+  }
   setHTMLKeepMedia(el, `
     ${_dirEditorHeader(p, true)}
     <input type="file" id="dir-upload-file" accept=".mp4,.mov,.m4v,.webm,.mkv,video/*" style="display:none">
-    ${busy ? `<div class="card" style="margin-bottom:14px;border-color:#f59e0b70">
-      <div style="font-size:.82rem;color:#f59e0b">⏳ ${esc(p.progress_msg || p.status + '…')}</div>
-      <div style="font-size:.72rem;color:var(--muted);margin-top:4px">The 3060 renders one segment at a time — a shot takes ~2–4 min. This page live-updates.</div>
-    </div>` : ''}
+    <div id="dir-busy">${busyHtml}</div>
     ${p.status === 'failed' ? `<div class="card" style="margin-bottom:14px;border-color:#ef444470">
       <div style="font-size:.8rem;color:#fca5a5;white-space:pre-wrap;font-family:monospace">${esc(p.error || 'failed')}</div>
       ${scenes.length ? '' : `<button class="btn-sm" style="margin-top:8px" onclick="dirRetry(${p.id})">🔁 Try again</button>`}</div>` : ''}
@@ -384,9 +411,16 @@ async function _dirRenderEditor(id) {
       <button class="btn-sm" style="margin-top:8px" onclick="dirAddSfx(${p.id})">＋ SFX cue</button>
     </div>
 
-    ${(p.scenes || []).map(sc => _dirSceneCard(sc, p)).join('')}
+    <div id="dir-scenes"></div>
 
-    ${_dirFinalCard(p, allDone, busy)}`);
+    <div id="dir-final">${finalHtml}</div>`);
+  el._dirSkel = skelKey;
+  const scEl = document.getElementById('dir-scenes');
+  if (scEl) { syncCards(scEl, scenes, sc => _dirSceneCard(sc, p)); restoreMediaState(scEl); }
+  const fEl = document.getElementById('dir-final');
+  if (fEl) fEl._html = finalHtml;
+  const bEl = document.getElementById('dir-busy');
+  if (bEl) bEl._html = busyHtml;
 
   if (busy && _currentView === 'director' && _dirOpenId === id) {
     _dirPollTimer = setTimeout(() => { if (_currentView === 'director' && _dirOpenId === id) _dirRenderEditor(id); }, 2500);
