@@ -6,12 +6,21 @@ __pycache__/
 
 # Local config / secrets
 .env
+# Hand-made copies carry the same live keys as .env but are not matched by the
+# rule above (e.g. .env.bak, .env.2026-01-01, .env.old). Keep the tracked template.
+.env.*
+!.env.example
 
 # Runtime data — store.db holds credentials (settings table); never commit it.
 # A fresh DB is created on first run (init_db). The -shm/-wal siblings are
 # SQLite's live journal files — transient, but present whenever the app runs.
 store.db
 store.db-*
+# Dotted copies (store.db.pre-<version>.bak, store.db.2026-01-01 …) — the
+# `store.db-*` rule above only matches the dash form, so it misses these.
+store.db.*
+*.sqlite
+*.sqlite.gz
 backups/
 *.tar.gz
 
