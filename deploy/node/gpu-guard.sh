@@ -36,7 +36,7 @@ DOCKER="$(command -v docker || echo /usr/bin/docker)"
 HEAVY_RE='SteamLaunch AppId=|pressure-vessel|wineserver|blender|retroarch|qemu-system|ryujinx|xemu|dolphin-emu|UltiMaker-Cura|OrcaSlicer'
 # GPU processes that are ALLOWED to hold VRAM (the AI stack itself + desktop +
 # the idle Steam client UI, whose steamwebhelper holds a few hundred MB):
-ALLOW_RE='gnome-shell|Xorg|Xwayland|gnome-remote-desktop|mutter|lm-studio|\.lmstudio|ComfyUI|jellyminer|firefox|steamwebhelper'
+ALLOW_RE='gnome-shell|Xorg|Xwayland|gnome-remote-desktop|mutter|lm-studio|\.lmstudio|llama-server|llama\.cpp|ComfyUI|jellyminer|firefox|steamwebhelper'
 
 # Token: env file first; else parse a literal --token out of jellyminer.service
 # (never a ${VAR} placeholder) so the two services can't drift apart.
