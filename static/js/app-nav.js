@@ -168,6 +168,7 @@ async function renderView(view) {
       case 'knowledge':     await renderKnowledge();       break;
       case 'network-security': await renderNetworkSecurity(); break;
       case 'homelab':       await renderHomelab();         break;
+      case 'infra':         await renderInfra();           break;
       case 'crypto':        await renderFinance('crypto');     break;
       case 'oracle':        await renderOracle();          break;
       case 'research':       await renderKnowledge('research'); break;

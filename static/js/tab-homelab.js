@@ -9,8 +9,8 @@ let _hlIncludeHidden = false;
 async function renderHomelab() {
   document.getElementById('main-content').innerHTML = `
     <div class="view-header">
-      <div class="view-title">&#128268; Services</div>
-      <div class="view-sub">Your homelab in one place — Docker services, *arr apps, and anything you add. Click to open.</div>
+      <div class="view-title">&#128051; Docker</div>
+      <div class="view-sub">Your containers in one place — Docker services, *arr apps, and anything you add. Click to open. For host CPU/RAM/disk/GPU, see Infrastructure.</div>
     </div>
     <div id="hl-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;"></div>
     <div id="hl-body"><div class="loading-state">Discovering services…</div></div>`;
