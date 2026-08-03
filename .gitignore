@@ -6,12 +6,21 @@ __pycache__/
 
 # Local config / secrets
 .env
+# ...and every hand-made variant of it. `.env` alone did NOT cover copies like
+# `.env.bak-domain`, which carry the same live keys and were one `git add -A`
+# away from being published. Keep the shipped template tracked.
+.env.*
+!.env.example
 
 # Runtime data — store.db holds credentials (settings table); never commit it.
 # A fresh DB is created on first run (init_db). The -shm/-wal siblings are
 # SQLite's live journal files — transient, but present whenever the app runs.
 store.db
 store.db-*
+# Dotted copies (store.db.pre-<ver>.bak etc.) — `store.db-*` misses these.
+store.db.*
+*.sqlite
+*.sqlite.gz
 backups/
 *.tar.gz
 
@@ -66,3 +75,18 @@ app/voice_models/
 
 # Claude Code agent worktrees / local state
 .claude/
+
+# Internal operator notes — these describe the REAL deployment: host IPs, the
+# LAN layout, the passwordless-SSH trust between boxes, and which tabs hold
+# which credentials. They are working notes, not product docs. Never publish.
+NODE_SETUP_HANDOFF.md
+EPIC-NATIVE-MCP-INTEGRATION.md
+TAB-QA-REPORT.md
+
+# Generated channel/show art — runtime media, same rule as designs/pending
+# and designs/sizes above.
+designs/tv/
+
+# Security scan output for the operator's OWN network (Pi-hole/DNS audits etc).
+# These are vulnerability reports about a live install — never publishable.
+network-security/reports/
